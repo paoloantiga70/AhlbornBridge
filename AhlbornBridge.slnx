@@ -1,0 +1,7 @@
+<Solution>
+  <Configurations>
+    <Platform Name="x64" />
+    <Platform Name="x86" />
+  </Configurations>
+  <Project Path="Test1/AhlbornBridge.vcxproj" Id="68fe83ff-e921-4e33-9815-d3975b029d45" />
+</Solution>
