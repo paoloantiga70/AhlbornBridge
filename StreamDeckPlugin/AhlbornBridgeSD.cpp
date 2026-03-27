@@ -318,30 +318,28 @@ static std::string XmlEscape(const std::string& s)
     return out;
 }
 
-static std::vector<std::string> WrapTitleLines(const std::string& text, int maxChars = 9, int maxLines = 5)
+static std::vector<std::string> WrapTitleLines(const std::string& text, int maxChars = 10, int maxLines = 6)
 {
     std::vector<std::string> lines;
-    std::string line, word;
-    auto flushWord = [&]() {
-        if (word.empty()) return;
-        if (!line.empty() && (int)(line.size() + 1 + word.size()) > maxChars)
-        {
-            lines.push_back(line);
-            line.clear();
-            if ((int)lines.size() >= maxLines) { word.clear(); return; }
-        }
-        if (!line.empty()) line += ' ';
-        line += word;
-        word.clear();
-    };
-    for (char c : text)
+    std::string word;
+    for (size_t i = 0; i <= text.size(); ++i)
     {
-        if (c == ' ' || c == '-') { word += c; flushWord(); }
-        else word += c;
-        if ((int)lines.size() >= maxLines) break;
+        char c = (i < text.size()) ? text[i] : '\0';
+        if (c == ' ' || c == '\0')
+        {
+            if (!word.empty() && (int)lines.size() < maxLines)
+            {
+                if ((int)word.size() > maxChars)
+                    word.resize(maxChars);
+                lines.push_back(word);
+                word.clear();
+            }
+        }
+        else
+        {
+            word += c;
+        }
     }
-    flushWord();
-    if (!line.empty() && (int)lines.size() < maxLines) lines.push_back(line);
     return lines;
 }
 
@@ -364,21 +362,18 @@ static std::string BuildButtonSvg(const std::string& title, bool loaded)
     {
         std::string color = loaded ? "#44ff44" : "#ffffff";
         auto lines = WrapTitleLines(title);
-        int fontSize = 20;
-        int lineHeight = fontSize + 4;
+        int fontSize = 22;
+        int lineHeight = fontSize + 2;
         int totalHeight = (int)lines.size() * lineHeight;
         int startY = (144 - totalHeight) / 2 + fontSize;
-        svg += "<text x='72' y='" + std::to_string(startY) + "' "
-               "font-family='Arial' font-size='" + std::to_string(fontSize) + "' "
-               "fill='" + color + "' text-anchor='middle' font-weight='bold'>";
         for (int i = 0; i < (int)lines.size(); ++i)
         {
-            if (i == 0)
-                svg += "<tspan x='72' dy='0'>" + XmlEscape(lines[i]) + "</tspan>";
-            else
-                svg += "<tspan x='72' dy='" + std::to_string(lineHeight) + "'>" + XmlEscape(lines[i]) + "</tspan>";
+            int y = startY + i * lineHeight;
+            svg += "<text x='72' y='" + std::to_string(y) + "' "
+                   "font-family='Arial' font-size='" + std::to_string(fontSize) + "' "
+                   "fill='" + color + "' text-anchor='middle' font-weight='bold'>"
+                   + XmlEscape(lines[i]) + "</text>";
         }
-        svg += "</text>";
     }
     svg += "</svg>";
     return svg;
