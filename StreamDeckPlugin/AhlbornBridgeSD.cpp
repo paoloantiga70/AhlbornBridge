@@ -449,6 +449,16 @@ static void UpdateAllButtons()
     {
         std::string title = ResolveButtonTitle(info.organIndex, info.organName);
 
+        // If we resolved a better name than what's cached, persist it to settings
+        if (title != info.organName && title != "Empty" && title != "Disconnected."
+            && title.rfind("ORGAN ", 0) != 0)
+        {
+            info.organName = title;
+            std::string settingsJson = "{\"organIndex\":" + std::to_string(info.organIndex)
+                + ",\"organName\":\"" + EscapeJson(title) + "\"}";
+            SdSetSettings(ctx, settingsJson);
+        }
+
         int st = (info.organIndex == loaded && loaded > 0) ? 1 : 0;
         Log("  button ctx=%.30s organIndex=%d title=%s state=%d",
             ctx.c_str(), info.organIndex, title.c_str(), st);
@@ -807,8 +817,25 @@ static void HttpListenerThread()
             {
                 Log("[HTTP] SetOrgan: ctx=%.40s organIndex=%d", ctx.c_str(), organIndex);
 
+                // Look up organ name for settings persistence
+                std::string organName;
+                {
+                    std::lock_guard<std::mutex> ol(g_organsMutex);
+                    for (auto& o : g_organs)
+                    {
+                        if (o.index == organIndex)
+                        {
+                            organName = o.name;
+                            break;
+                        }
+                    }
+                }
+
                 // Persist settings via SD API (plugin-side setSettings works)
-                std::string settingsJson = "{\"organIndex\":" + std::to_string(organIndex) + "}";
+                std::string settingsJson = "{\"organIndex\":" + std::to_string(organIndex);
+                if (!organName.empty())
+                    settingsJson += ",\"organName\":\"" + EscapeJson(organName) + "\"";
+                settingsJson += "}";
                 SdSetSettings(ctx, settingsJson);
 
                 // Update internal state
@@ -816,7 +843,11 @@ static void HttpListenerThread()
                     std::lock_guard<std::mutex> lk(g_buttonsMutex);
                     auto it = g_visibleButtons.find(ctx);
                     if (it != g_visibleButtons.end())
+                    {
                         it->second.organIndex = organIndex;
+                        if (!organName.empty())
+                            it->second.organName = organName;
+                    }
                 }
 
                 // Update button display
