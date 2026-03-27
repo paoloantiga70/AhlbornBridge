@@ -126,6 +126,9 @@
       <SubSystem>Windows</SubSystem>
       <GenerateDebugInformation>true</GenerateDebugInformation>
     </Link>
+    <PreBuildEvent>
+      <Command>powershell -NoProfile -ExecutionPolicy Bypass -File "$(ProjectDir)..\bump-version.ps1" patch</Command>
+    </PreBuildEvent>
   </ItemDefinitionGroup>
   <ItemGroup>
     <ClCompile Include="AhlbornBridge.cpp" />
@@ -134,6 +137,7 @@
     <ClCompile Include="Midi.cpp" />
     <ClCompile Include="Qt.cpp" />
     <ClCompile Include="StreamDeck.cpp" />
+    <ClCompile Include="StreamDeck_profiler.cpp" />
     <ClCompile Include="TrayIcon.cpp" />
     <ClCompile Include="Xml.cpp" />
   </ItemGroup>
@@ -144,6 +148,7 @@
     <ClInclude Include="Midi.h" />
     <ClInclude Include="Qt.h" />
     <ClInclude Include="StreamDeck.h" />
+    <ClInclude Include="StreamDeck_profiler.h" />
     <ClInclude Include="TrayIcon.h" />
     <ClInclude Include="Version.h" />
     <ClInclude Include="Xml.h" />
@@ -152,6 +157,11 @@
     <None Include="AhlbornBridge.iss" />
     <None Include="AhlbornBridge.vcxproj.filters" />
   </ItemGroup>
+  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
+    <PostBuildEvent>
+      <Command>powershell -NoProfile -Command "$v = (Select-String -Path '$(ProjectDir)Version.h' -Pattern '#define APP_VERSION \"(.+?)\"').Matches[0].Groups[1].Value; $iss = Get-Content '$(ProjectDir)AhlbornBridge.iss' -Raw; $iss = $iss -replace '@APP_VERSION@', $v; Set-Content '$(OutDir)AhlbornBridgeInstaller.iss' $iss -NoNewline; Write-Host \"Patched ISS with version $v\""</Command>
+    </PostBuildEvent>
+  </ItemDefinitionGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">
   </ImportGroup>

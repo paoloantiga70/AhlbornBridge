@@ -7,6 +7,8 @@
 #define mLOAD_FAVORITE_ORGAN_4 L"Organ", L"Load favorite organ", L"4: "
 #define mLOAD_FAVORITE_ORGAN_5 L"Organ", L"Load favorite organ", L"5: "
 #define mLOAD_FAVORITE_ORGAN_6 L"Organ", L"Load favorite organ", L"6: "
+#define mLOAD_FAVORITE_ORGAN_7 L"Organ", L"Load favorite organ", L"7: "
+#define mLOAD_FAVORITE_ORGAN_8 L"Organ", L"Load favorite organ", L"8: "
 
 #include <windows.h>
 #include <oleacc.h>
@@ -44,3 +46,6 @@ void DismissMenus(HWND hwnd);
 
 // Naviga un percorso di menu a profondita' arbitraria
 bool ClickMenuPath(HWND hwndReal, const std::vector<const wchar_t*>& path);
+
+// Apre la finestra "Load organ ..." e seleziona l'organo per nome
+bool LoadOrganByName(HWND hwndReal, const std::wstring& organName);

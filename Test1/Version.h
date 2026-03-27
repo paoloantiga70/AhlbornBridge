@@ -7,9 +7,9 @@
 // installer script automatically.
 // ---------------------------------------------------------------
 #define APP_VERSION_MAJOR 0
-#define APP_VERSION_MINOR 1
-#define APP_VERSION_PATCH 1
-#define APP_VERSION "0.1.1"
+#define APP_VERSION_MINOR 3
+#define APP_VERSION_PATCH 18
+#define APP_VERSION "0.3.18"
 
 // GitHub repository for auto-update checks.
 // Change these to match your GitHub repository.

@@ -12,7 +12,9 @@
 HMIDIIN hMidiIn = nullptr;
 HMIDIIN hMidiIn2 = nullptr;
 HMIDIOUT hMidiOut = nullptr;
+HMIDIOUT hMidiOut2 = nullptr;
 HANDLE hThread = nullptr;
+CRITICAL_SECTION g_midiOutLock;
 
 std::atomic<uint64_t> noteState[kChannels][2] = {};
 std::atomic<uint64_t> outputNoteState[kChannels][2] = {};
@@ -30,7 +32,10 @@ bool isOrganLoaded = false;
 std::atomic<bool> g_inputDeviceOpen{ false };
 std::atomic<bool> g_input2DeviceOpen{ false };
 std::atomic<bool> g_outputDeviceOpen{ false };
+std::atomic<bool> g_output2DeviceOpen{ false };
 std::atomic<bool> g_isLoadingOrgan{ false };
+std::atomic<int> g_currentLoadedFavoriteIndex{ 0 };
+std::atomic<int> g_currentLoadedInstalledOrganIndex{ 0 };
 std::atomic<TrayIconImageStatus> g_trayIconImageStatus{ TrayIconImageStatus::Disabled };
 std::wstring g_hauptwerkOrganTitle;
 
@@ -87,11 +92,18 @@ namespace
             bool dispatched = false;
             while (g_midiOutQueue.TryDequeue(msg))
             {
+                EnterCriticalSection(&g_midiOutLock);
                 HMIDIOUT out = hMidiOut;
                 if (out != nullptr)
                 {
                     midiOutShortMsg(out, msg);
                 }
+                HMIDIOUT out2 = hMidiOut2;
+                if (out2 != nullptr)
+                {
+                    midiOutShortMsg(out2, msg);
+                }
+                LeaveCriticalSection(&g_midiOutLock);
                 dispatched = true;
             }
             if (!dispatched)
@@ -103,11 +115,18 @@ namespace
         DWORD msg;
         while (g_midiOutQueue.TryDequeue(msg))
         {
+            EnterCriticalSection(&g_midiOutLock);
             HMIDIOUT out = hMidiOut;
             if (out != nullptr)
             {
                 midiOutShortMsg(out, msg);
             }
+            HMIDIOUT out2 = hMidiOut2;
+            if (out2 != nullptr)
+            {
+                midiOutShortMsg(out2, msg);
+            }
+            LeaveCriticalSection(&g_midiOutLock);
         }
         return 0;
     }
@@ -136,7 +155,34 @@ namespace
         LoadFavoriteOrgan3,
         LoadFavoriteOrgan4,
         LoadFavoriteOrgan5,
-        LoadFavoriteOrgan6
+        LoadFavoriteOrgan6,
+        LoadFavoriteOrgan7,
+        LoadFavoriteOrgan8,
+        LoadFavoriteOrgan9,
+        LoadFavoriteOrgan10,
+        LoadFavoriteOrgan11,
+        LoadFavoriteOrgan12,
+        LoadFavoriteOrgan13,
+        LoadFavoriteOrgan14,
+        LoadFavoriteOrgan15,
+        LoadFavoriteOrgan16,
+        LoadFavoriteOrgan17,
+        LoadFavoriteOrgan18,
+        LoadFavoriteOrgan19,
+        LoadFavoriteOrgan20,
+        LoadFavoriteOrgan21,
+        LoadFavoriteOrgan22,
+        LoadFavoriteOrgan23,
+        LoadFavoriteOrgan24,
+        LoadFavoriteOrgan25,
+        LoadFavoriteOrgan26,
+        LoadFavoriteOrgan27,
+        LoadFavoriteOrgan28,
+        LoadFavoriteOrgan29,
+        LoadFavoriteOrgan30,
+        LoadFavoriteOrgan31,
+        LoadFavoriteOrgan32,
+        LoadInstalledOrgan      // payload: g_pendingInstalledOrganIndex (1-based)
     };
 
     constexpr unsigned int kDeferredCmdQueueCapacity = 64; // power of 2
@@ -173,6 +219,7 @@ namespace
 
     DeferredCmdQueue g_deferredCmdQueue;
     HANDLE g_deferredCmdWorkerThread = nullptr;
+    std::atomic<int> g_pendingInstalledOrganIndex{ 0 };
 
     DWORD WINAPI DeferredCmdWorkerThread(LPVOID)
     {
@@ -186,57 +233,53 @@ namespace
                 switch (cmd)
                 {
                     
-                case DeferredCmd::LoadFavoriteOrgan0:
-                    printf("[Deferred] Unload organ ...\n");
-                    if (!ClickMenu(g_hauptwerkMainWindow,  mUNLOAD_ORGAN ))
-                    {
+				case DeferredCmd::LoadFavoriteOrgan0:
+					printf("[Deferred] Unload organ ...\n");
+					if (!ClickMenu(g_hauptwerkMainWindow,  mUNLOAD_ORGAN ))
+					{
 						printf("Bridge is unchecked!!..\n");
-                    }
-                    break;
-                case DeferredCmd::LoadFavoriteOrgan1:
-                    printf("[Deferred] Loading favorite organ 1...\n");
-                    if (!ClickMenuPath(g_hauptwerkMainWindow, { mLOAD_FAVORITE_ORGAN_1 }))
-                    {
-                        printf("Bridge is unchecked!!..\n");
-                    }
-                    break;
-                case DeferredCmd::LoadFavoriteOrgan2:
-                    printf("[Deferred] Loading favorite organ 2...\n");
-                    if (!ClickMenuPath(g_hauptwerkMainWindow, { mLOAD_FAVORITE_ORGAN_2 }))
-                    {
-                        printf("Bridge is unchecked!!..\n");
-                    }
-                    break;
-                case DeferredCmd::LoadFavoriteOrgan3:
-                    printf("[Deferred] Loading favorite organ 3...\n");
-                    if (!ClickMenuPath(g_hauptwerkMainWindow, { mLOAD_FAVORITE_ORGAN_3 }))
-                    {
-                        printf("Bridge is unchecked!!..\n");
-                    }
-                    break;
-                case DeferredCmd::LoadFavoriteOrgan4:
-                    printf("[Deferred] Loading favorite organ 4...\n");
-                    if (!ClickMenuPath(g_hauptwerkMainWindow, { mLOAD_FAVORITE_ORGAN_4 }))
-                    {
-                        printf("Bridge is unchecked!!..\n");
-                    }
-                    break;
-                case DeferredCmd::LoadFavoriteOrgan5:
-                    printf("[Deferred] Loading favorite organ 5...\n");
-                    if (!ClickMenuPath(g_hauptwerkMainWindow, { mLOAD_FAVORITE_ORGAN_5 }))
-                    {
-                        printf("Bridge is unchecked!!..\n");
-                    }
-                    break;
-                case DeferredCmd::LoadFavoriteOrgan6:
-                    printf("[Deferred] Loading favorite organ 6...\n");
-                    if (!ClickMenuPath(g_hauptwerkMainWindow, { mLOAD_FAVORITE_ORGAN_6  }))
-                    {
-                        printf("Bridge is unchecked!!..\n");
-                    }
-                    break;
-                default:
-                    break;
+					}
+					break;
+				case DeferredCmd::LoadInstalledOrgan:
+					{
+						int idx = g_pendingInstalledOrganIndex.load();
+						printf("[Deferred] LoadInstalledOrgan %d — loading via GUI automation\n", idx);
+
+						std::vector<std::wstring> names = LoadInstalledOrganNames();
+						if (idx >= 1 && idx <= static_cast<int>(names.size()) && !names[idx - 1].empty())
+						{
+							const std::wstring& name = names[idx - 1];
+							printf("[Deferred] Organ name: %S\n", name.c_str());
+							if (!LoadOrganByName(g_hauptwerkMainWindow, name))
+							{
+								printf("Bridge is unchecked!!..\n");
+							}
+						}
+						else
+						{
+							printf("[Deferred] Installed organ index %d not found (list size=%zu).\n",
+								idx, names.size());
+						}
+						break;
+					}
+				default:
+				{
+					DWORD cmdVal = static_cast<DWORD>(cmd);
+					DWORD base   = static_cast<DWORD>(DeferredCmd::LoadFavoriteOrgan1);
+					DWORD top    = static_cast<DWORD>(DeferredCmd::LoadFavoriteOrgan32);
+					if (cmdVal >= base && cmdVal <= top)
+					{
+						int organIdx = static_cast<int>(cmdVal - base) + 1;
+						printf("[Deferred] Loading favorite organ %d...\n", organIdx);
+						std::wstring label = std::to_wstring(organIdx) + L": ";
+						if (!ClickMenuPath(g_hauptwerkMainWindow,
+							{ L"Organ", L"Load favorite organ", label.c_str() }))
+						{
+							printf("Bridge is unchecked!!..\n");
+						}
+					}
+					break;
+				}
                 }
             }
             if (!dispatched)
@@ -309,11 +352,13 @@ namespace
 	constexpr wchar_t kHauptwerkOrganDefinitions[] = L"E:\\Audio applications\\h\\Hauptwerk\\HauptwerkSampleSetsAndComponents\\OrganDefinitions";
 
     std::atomic<bool> g_trayFlashActive{ false };
+    std::atomic<bool> g_trayFlashFromFe{ false };
     std::atomic<bool> g_pendingOrganLoad{ false };
     std::atomic<bool> g_organLoadCancelled{ false };
     HANDLE g_trayFlashThread = nullptr;
     HANDLE g_hauptwerkTitleMonitorThread = nullptr;
     HANDLE g_organLoadingWatchThread = nullptr;
+    HANDLE g_streamDeckMonitorThread = nullptr;
 
     TimePoint g_hauptwerkKeyLastPressTime{};
     std::atomic<TimePoint> g_firstFeTime{}; // timestamp of first received FE in current session
@@ -424,7 +469,7 @@ namespace
 
             UpdateTrayIconTooltip(L"STARTING HAUPTWERK...");
             showOnline = !showOnline;
-            UpdateTrayIconFromFile(showOnline ? GetStandbyIconForCurrentDeviceState() : kIconDisabled);
+            UpdateTrayIconFromFile(showOnline ? (g_trayFlashFromFe.load() ? kIconStandbye1 : kIconStandbye) : kIconDisabled);
             g_trayIconImageStatus = showOnline ? TrayIconImageStatus::Standby : TrayIconImageStatus::Disabled;
             Sleep(static_cast<DWORD>(kTrayFlashInterval.count()));
         }
@@ -544,6 +589,8 @@ namespace
                     UpdateTrayIconFromFile(GetStandbyIconForCurrentDeviceState());
                     lastState = IconState::Standby;
                     isOrganLoaded = false;
+                    g_currentLoadedFavoriteIndex = 0;
+                    g_currentLoadedInstalledOrganIndex = 0;
                     g_hauptwerkOrganTitle.clear();
                     NotifyOrganInfoTitleChanged();
                     g_trayIconImageStatus = TrayIconImageStatus::Standby;
@@ -751,9 +798,8 @@ namespace
                     if (!organLoaded)
                     {
                         g_organLoadCancelled = true;
-                        DWORD cancelMsg = CC_ch16 | (BF_0x50 << 8) | (0 << 16);
-                        EnqueueMidiOutMessage(cancelMsg);
-                        printf("[OrganLoadingWatch] CANCEL confirmed - Sent MIDI BF 50 00 (isOrganLoaded=%d)\n", (int)organLoaded);
+                        SendUnloadOrganMidiMessage();
+                        printf("[OrganLoadingWatch] CANCEL confirmed (isOrganLoaded=%d)\n", (int)organLoaded);
                     }
                     else
                     {
@@ -776,17 +822,44 @@ namespace
                         // Compare with standby organs stored in Settings.xml
                         // using exact match on the cleaned organ title.
                         std::vector<std::wstring> standbyNames = LoadStandbyOrganNames();
-                        for (int idx = 0; idx < 8; ++idx)
+                        for (int idx = 0; idx < 32; ++idx)
                         {
                             if (!standbyNames[idx].empty() && title == standbyNames[idx])
                             {
                                 printf("[OrganLoadingWatch] MATCH Standby_Organ0%d: %S\n",
                                     idx + 1, standbyNames[idx].c_str());
 
+                                g_currentLoadedFavoriteIndex = idx + 1;
+                                printf("[OrganLoadingWatch] g_currentLoadedFavoriteIndex = %d\n", idx + 1);
+
                                 // Send MIDI out: BF 50 <1-based index>
                                 DWORD midiMsg = CC_ch16 | (BF_0x50 << 8) | ((idx + 1) << 16);
                                 EnqueueMidiOutMessage(midiMsg);
                                 printf("[OrganLoadingWatch] Sent MIDI BF 50 %02X\n", idx + 1);
+                                break;
+                            }
+                        }
+
+                        // Also compare with the installed organs list so that BF 51
+                        // buttons are lit correctly when the Stream Deck starts late.
+                        std::vector<std::wstring> installedNames = LoadInstalledOrganNames();
+                        for (int iidx = 0; iidx < static_cast<int>(installedNames.size()); ++iidx)
+                        {
+                            if (!installedNames[iidx].empty() && title == installedNames[iidx])
+                            {
+                                printf("[OrganLoadingWatch] MATCH InstalledOrgan %d: %S\n",
+                                    iidx + 1, installedNames[iidx].c_str());
+
+                                g_currentLoadedInstalledOrganIndex = iidx + 1;
+                                printf("[OrganLoadingWatch] g_currentLoadedInstalledOrganIndex = %d\n", iidx + 1);
+
+                                // Send MIDI out: BF 51 <1-based index>
+                                DWORD midiMsg = CC_ch16 | (BF_0x51 << 8) | ((iidx + 1) << 16);
+                                EnqueueMidiOutMessage(midiMsg);
+                                printf("[OrganLoadingWatch] Sent MIDI BF 51 %02X\n", iidx + 1);
+
+                                // Notify Stream Deck plugin of loaded organ
+                                NotifyStreamDeckOrganState(iidx + 1);
                                 break;
                             }
                         }
@@ -815,9 +888,8 @@ namespace
 
                             if (!organLoaded)
                             {
-                                DWORD cancelMsg = CC_ch16 | (BF_0x50 << 8) | (0 << 16);
-                                EnqueueMidiOutMessage(cancelMsg);
-                                printf("[OrganLoadingWatch] Sent MIDI BF 50 00 (cancel notification)\n");
+                                SendUnloadOrganMidiMessage();
+                                printf("[OrganLoadingWatch] Cancel notification sent\n");
                             }
                         }
 
@@ -864,6 +936,128 @@ namespace
         g_trayFlashActive = false;
     }
 
+    // Logs the names of the currently open MIDI output ports.
+    void LogOpenOutputPorts()
+    {
+        EnterCriticalSection(&g_midiOutLock);
+        HMIDIOUT out1 = hMidiOut;
+        HMIDIOUT out2 = hMidiOut2;
+        LeaveCriticalSection(&g_midiOutLock);
+
+        if (out1 != nullptr)
+        {
+            UINT id1 = 0;
+            MIDIOUTCAPSW caps1{};
+            if (midiOutGetID(out1, &id1) == MMSYSERR_NOERROR &&
+                midiOutGetDevCapsW(id1, &caps1, sizeof(caps1)) == MMSYSERR_NOERROR)
+                printf("[StreamDeck] Output 01 open: [%u] %S\n", id1, caps1.szPname);
+        }
+        else
+        {
+            printf("[StreamDeck] Output 01: NOT open\n");
+        }
+
+        if (out2 != nullptr)
+        {
+            UINT id2 = 0;
+            MIDIOUTCAPSW caps2{};
+            if (midiOutGetID(out2, &id2) == MMSYSERR_NOERROR &&
+                midiOutGetDevCapsW(id2, &caps2, sizeof(caps2)) == MMSYSERR_NOERROR)
+                printf("[StreamDeck] Output 02 open: [%u] %S\n", id2, caps2.szPname);
+        }
+        else
+        {
+            printf("[StreamDeck] Output 02: NOT open\n");
+        }
+    }
+
+    // Sends the current organ state (favorite and/or installed) to the Stream Deck,
+    // retrying at 500 ms, 2000 ms and 4000 ms after plugin detection
+    // to cover slow plugin initialisation times.
+    void SyncStreamDeckOrganState()
+    {
+        int favIdx  = g_currentLoadedFavoriteIndex.load();
+        int instIdx = g_currentLoadedInstalledOrganIndex.load();
+        if (favIdx <= 0 && instIdx <= 0)
+        {
+            printf("[StreamDeck] No organ loaded, skipping state sync.\n");
+            return;
+        }
+
+        constexpr DWORD kRetryDelays[] = { 500, 1500, 2000 }; // cumulative gaps: 500, 2000, 4000 ms
+        for (DWORD delay : kRetryDelays)
+        {
+            if (!running) break;
+            Sleep(delay);
+
+            favIdx  = g_currentLoadedFavoriteIndex.load();
+            instIdx = g_currentLoadedInstalledOrganIndex.load();
+            if (favIdx <= 0 && instIdx <= 0)
+            {
+                printf("[StreamDeck] Organ unloaded during retry, aborting sync.\n");
+                break;
+            }
+
+            LogOpenOutputPorts();
+
+            if (favIdx > 0)
+            {
+                DWORD midiMsg = CC_ch16 | (BF_0x50 << 8) | (static_cast<DWORD>(favIdx) << 16);
+                bool enqueued = EnqueueMidiOutMessage(midiMsg);
+                printf("[StreamDeck] Send BF 50 %02X (favorite %d): %s\n",
+                    favIdx, favIdx, enqueued ? "enqueued OK" : "FAILED (queue full?)");
+            }
+
+            if (instIdx > 0)
+            {
+                DWORD midiMsg = CC_ch16 | (BF_0x51 << 8) | (static_cast<DWORD>(instIdx) << 16);
+                bool enqueued = EnqueueMidiOutMessage(midiMsg);
+                printf("[StreamDeck] Send BF 51 %02X (installed %d): %s\n",
+                    instIdx, instIdx, enqueued ? "enqueued OK" : "FAILED (queue full?)");
+            }
+        }
+    }
+
+    DWORD WINAPI StreamDeckMonitorThread(LPVOID)
+    {
+        constexpr wchar_t kPluginProcess[] = L"se.trevligaspel.midiplugin.exe";
+        bool wasRunning = false;
+        while (running)
+        {
+            bool isRunning = IsProcessRunningByName(kPluginProcess);
+            if (isRunning && !wasRunning)
+            {
+                printf("[StreamDeck] Plugin process started: %S\n", kPluginProcess);
+                SyncStreamDeckOrganState();
+            }
+            else if (!isRunning && wasRunning)
+            {
+                printf("[StreamDeck] Plugin process stopped: %S\n", kPluginProcess);
+            }
+            wasRunning = isRunning;
+            Sleep(500);
+        }
+        return 0;
+    }
+
+    void StartStreamDeckMonitor()
+    {
+        if (g_streamDeckMonitorThread)
+        {
+            DWORD exitCode = 0;
+            if (GetExitCodeThread(g_streamDeckMonitorThread, &exitCode) && exitCode != STILL_ACTIVE)
+            {
+                CloseHandle(g_streamDeckMonitorThread);
+                g_streamDeckMonitorThread = nullptr;
+            }
+        }
+
+        if (!g_streamDeckMonitorThread)
+        {
+            g_streamDeckMonitorThread = CreateThread(nullptr, 0, StreamDeckMonitorThread, nullptr, 0, nullptr);
+        }
+    }
+
     void StartHauptwerkTitleMonitor()
     {
         if (g_hauptwerkTitleMonitorThread)
@@ -902,12 +1096,12 @@ namespace
         MIDIINCAPS caps;
         if (midiInGetDevCaps(devIndex, &caps, sizeof(caps)) != MMSYSERR_NOERROR)
         {
-            printf("Failed to query device 01 capabilities for device %u.\n", devIndex);
+            printf("[OpenMidiDevice] : Failed to query device 01 capabilities for device %u.\n", devIndex);
             g_inputDeviceOpen = false;
             return false;
         }
 
-        printf("Opening Midi Input device 01: [%S]\n", caps.szPname);
+        printf("[OpenMidiDevice] : Opening Midi Input device 01: [%S]\n", caps.szPname);
 
         if (midiInOpen(&hMidiIn,
             devIndex,
@@ -915,7 +1109,7 @@ namespace
             0,
             CALLBACK_FUNCTION) != MMSYSERR_NOERROR)
         {
-            printf("Failed to open MIDI device 01.\n");
+            printf("[OpenMidiDevice] : Failed to open MIDI device 01.\n");
             g_inputDeviceOpen = false;
             return false;
         }
@@ -930,12 +1124,12 @@ namespace
         MIDIINCAPS caps;
         if (midiInGetDevCaps(devIndex, &caps, sizeof(caps)) != MMSYSERR_NOERROR)
         {
-            printf("Failed to query device 02 capabilities for device %u.\n", devIndex);
+            printf("[OpenMidiDevice2] : Failed to query device 02 capabilities for device %u.\n", devIndex);
             g_input2DeviceOpen = false;
             return false;
         }
 
-        printf("Opening Midi Input device 02: [%S]\n", caps.szPname);
+        printf("[OpenMidiDevice2] : Opening Midi Input device 02: [%S]\n", caps.szPname);
 
         if (midiInOpen(&hMidiIn2,
             devIndex,
@@ -943,7 +1137,7 @@ namespace
             0,
             CALLBACK_FUNCTION) != MMSYSERR_NOERROR)
         {
-            printf("Failed to open MIDI device 02.\n");
+            printf("[OpenMidiDevice2] : Failed to open MIDI device 02.\n");
             g_input2DeviceOpen = false;
             return false;
         }
@@ -956,29 +1150,53 @@ namespace
 
 bool OpenMidiOutputDevice(UINT devIndex)
 {
-    MIDIOUTCAPS caps;
-    if (midiOutGetDevCaps(devIndex, &caps, sizeof(caps)) != MMSYSERR_NOERROR)
-    {
-        printf("Failed to query output device capabilities for device %u.\n", devIndex);
-        g_outputDeviceOpen = false;
-        return false;
-    }
+	MIDIOUTCAPS caps;
+	if (midiOutGetDevCaps(devIndex, &caps, sizeof(caps)) != MMSYSERR_NOERROR)
+	{
+		printf("[OpenMidiOutputDevice] : Failed to query output device capabilities for device %u.\n", devIndex);
+		g_outputDeviceOpen = false;
+		return false;
+	}
 
-    printf("Opening Midi output device 01: [%S]\n", caps.szPname);
+	printf("[OpenMidiOutputDevice] : Opening Midi output device 01: [%S]\n", caps.szPname);
 
-    if (midiOutOpen(&hMidiOut, devIndex, 0, 0, CALLBACK_NULL) != MMSYSERR_NOERROR)
-    {
-        printf("Failed to open MIDI output device 01.\n");
-        g_outputDeviceOpen = false;
-        return false;
-    }
+	if (midiOutOpen(&hMidiOut, devIndex, 0, 0, CALLBACK_NULL) != MMSYSERR_NOERROR)
+	{
+		printf("[OpenMidiOutputDevice] : Failed to open MIDI output device 01.\n");
+		g_outputDeviceOpen = false;
+		return false;
+	}
 
 	printf("\n");
-    g_outputDeviceOpen = true;
-    return true;
+	g_outputDeviceOpen = true;
+	return true;
 }
 
-    bool IsTopLevelWithChild(HWND hWnd)
+bool OpenMidiOutput2Device(UINT devIndex)
+{
+	MIDIOUTCAPS caps;
+	if (midiOutGetDevCaps(devIndex, &caps, sizeof(caps)) != MMSYSERR_NOERROR)
+	{
+		printf("Failed to query output device 2 capabilities for device %u.\n", devIndex);
+		g_output2DeviceOpen = false;
+		return false;
+	}
+
+	printf("Opening Midi output device 02: [%S]\n", caps.szPname);
+
+	if (midiOutOpen(&hMidiOut2, devIndex, 0, 0, CALLBACK_NULL) != MMSYSERR_NOERROR)
+	{
+		printf("Failed to open MIDI output device 02.\n");
+		g_output2DeviceOpen = false;
+		return false;
+	}
+
+	printf("\n");
+	g_output2DeviceOpen = true;
+	return true;
+}
+
+	bool IsTopLevelWithChild(HWND hWnd)
     {
         if (!hWnd || !IsWindow(hWnd))
         {
@@ -1000,6 +1218,7 @@ bool OpenMidiOutputDevice(UINT devIndex)
 // same tray flashing behaviour used when Hauptwerk is launched due to FE.
 void TriggerTrayIconStartupFlash()
 {
+    g_trayFlashFromFe = false;
     StartTrayIconFlashing();
 }
 
@@ -1012,6 +1231,28 @@ void StopTrayIconFlashing()
 bool EnqueueMidiOutMessage(DWORD msg)
 {
     return g_midiOutQueue.TryEnqueue(msg);
+}
+
+void EnqueueLoadInstalledOrgan(int index)
+{
+    if (index < 1 || index > 127) return;
+    if (g_isLoadingOrgan)
+    {
+        HWND hLoadingWnd = FindWindowW(nullptr, L"Loading organ");
+        if (hLoadingWnd)
+        {
+            PostMessageW(hLoadingWnd, WM_KEYDOWN, VK_RETURN, 0);
+            PostMessageW(hLoadingWnd, WM_KEYUP, VK_RETURN, 0);
+        }
+    }
+    g_pendingOrganLoad = true;
+    g_pendingInstalledOrganIndex.store(index);
+    g_deferredCmdQueue.TryEnqueue(DeferredCmd::LoadInstalledOrgan);
+}
+
+void EnqueueUnloadOrgan()
+{
+    g_deferredCmdQueue.TryEnqueue(DeferredCmd::LoadFavoriteOrgan0);
 }
 
 void clearAllNotes()
@@ -1255,9 +1496,10 @@ DWORD WINAPI WatchdogThread(LPVOID)
                 printf(">>> ************************ >>>\n");
                 g_hauptwerkKeyHeld = false;
                 if (feMessageAlive && g_hauptwerkMainWindow == nullptr)
-                {
-                    StartTrayIconFlashing();
-                }
+                    {
+                        g_trayFlashFromFe = true;
+                        StartTrayIconFlashing();
+                    }
                 else
                 {
                    
@@ -1310,6 +1552,7 @@ bool startsWithFe()
     StartMidiOutWorker();
     StartDeferredCmdWorker();
     StartHauptwerkTitleMonitor();
+    StartStreamDeckMonitor();
 
     if (hThread == NULL)
     {
@@ -1325,10 +1568,12 @@ bool startsWithFe()
 
 bool initMidiState()
 {
+    InitializeCriticalSection(&g_midiOutLock);
+
     UINT numDevs = midiInGetNumDevs();
     if (numDevs == 0)
     {
-        printf("No MIDI input devices found.\n");
+        printf("[initMidiState] : No MIDI input devices found.\n");
         g_inputDeviceOpen = false;
         return 1;
     }
@@ -1342,11 +1587,29 @@ bool initMidiState()
     }
 
     // List available MIDI input devices and prompt the user to choose one.
-    printf("Available MIDI input devices:\n\n");
+    printf("\n[initMidiState] : Available MIDI input devices:\n\n");
     for (UINT i = 0; i < numDevs; ++i)
     {
         MIDIINCAPS caps;
         if (midiInGetDevCaps(i, &caps, sizeof(caps)) == MMSYSERR_NOERROR)
+        {
+            printf("  [%u] %S\n", i, caps.szPname);
+        }
+        else
+        {
+            printf("  [%u] (unknown)\n", i);
+        }
+    }
+
+        printf("\n");
+
+    // List available MIDI output devices
+    UINT numOutDevsDbg = midiOutGetNumDevs();
+    printf("[initMidiState] : Available MIDI output devices:\n\n");
+    for (UINT i = 0; i < numOutDevsDbg; ++i)
+    {
+        MIDIOUTCAPS caps;
+        if (midiOutGetDevCaps(i, &caps, sizeof(caps)) == MMSYSERR_NOERROR)
         {
             printf("  [%u] %S\n", i, caps.szPname);
         }
@@ -1364,7 +1627,7 @@ bool initMidiState()
     }
     else
     {
-        printf("Using default MIDI input device [0].\n");
+        printf("[initMidiState] : Using default MIDI input device [0].\n");
     }
 
     if (!OpenMidiDevice(devIndex))
@@ -1372,11 +1635,21 @@ bool initMidiState()
         g_inputDeviceOpen = false;
         return 1;
     }
+    {
+        bool input1Enabled = true;
+        LoadMidiInput1DeviceEnabled(input1Enabled);
+        if (!input1Enabled)
+            CloseMidiInputDeviceOnly();
+    }
 
     UINT savedDeviceId2 = 0;
     if (LoadSelectedInput2DeviceId(savedDeviceId2) && savedDeviceId2 < numDevs)
     {
         OpenMidiDevice2(savedDeviceId2);
+        bool input2Enabled = true;
+        LoadMidiInput2DeviceEnabled(input2Enabled);
+        if (!input2Enabled)
+            CloseMidiInput2DeviceOnly();
     }
 
     UINT numOutDevs = midiOutGetNumDevs();
@@ -1391,10 +1664,27 @@ bool initMidiState()
         {
             SwitchMidiOutputDevice(0);
         }
+        {
+            bool output1Enabled = true;
+            LoadMidiOutput1DeviceEnabled(output1Enabled);
+            if (!output1Enabled)
+                CloseMidiOutputDeviceOnly();
+        }
+
+        UINT savedOutput2DeviceId = 0;
+        if (LoadSelectedOutput2DeviceId(savedOutput2DeviceId) && savedOutput2DeviceId < numOutDevs)
+        {
+            SwitchMidiOutput2Device(savedOutput2DeviceId);
+            bool output2Enabled = true;
+            LoadMidiOutput2DeviceEnabled(output2Enabled);
+            if (!output2Enabled)
+                CloseMidiOutput2DeviceOnly();
+        }
     }
     else
     {
         g_outputDeviceOpen = false;
+        g_output2DeviceOpen = false;
     }
 
     bool routerEnabled = false;
@@ -1402,7 +1692,7 @@ bool initMidiState()
     {
         g_midiRouterEnabled = routerEnabled;
     }
-    printf("HAUPTWERK bridge enabled: [%s]\n\n", g_midiRouterEnabled.load() ? "true" : "false");
+    printf("[initMidiState] : HAUPTWERK bridge enabled: [%s]\n\n", g_midiRouterEnabled.load() ? "true" : "false");
 
     RefreshSettingsFile();
 
@@ -1414,14 +1704,14 @@ bool SwitchMidiInputDevice(UINT deviceId)
     UINT numDevs = midiInGetNumDevs();
     if (numDevs == 0)
     {
-        printf("No MIDI input devices found.\n");
+        printf("[SwitchMidiInputDevice] : No MIDI input devices found.\n");
         g_inputDeviceOpen = false;
         return false;
     }
 
     if (deviceId >= numDevs)
     {
-        printf("Selected MIDI device %u is out of range.\n", deviceId);
+        printf("[SwitchMidiInputDevice] : Selected MIDI device %u is out of range.\n", deviceId);
         g_inputDeviceOpen = false;
         return false;
     }
@@ -1431,11 +1721,11 @@ bool SwitchMidiInputDevice(UINT deviceId)
         UINT currentId = 0;
         if (midiInGetID(hMidiIn, &currentId) == MMSYSERR_NOERROR)
         {
-            printf("Closing MIDI device [%u].\n", currentId);
+            printf("[SwitchMidiInputDevice] : Closing MIDI device [%u].\n", currentId);
         }
         else
         {
-            printf("Closing current MIDI device.\n");
+            printf("[SwitchMidiInputDevice] : Closing current MIDI device.\n");
         }
 
         midiInStop(hMidiIn);
@@ -1452,14 +1742,14 @@ bool SwitchMidiInput2Device(UINT deviceId)
     UINT numDevs = midiInGetNumDevs();
     if (numDevs == 0)
     {
-        printf("No MIDI input devices found.\n");
+        printf("[SwitchMidiInput2Device] : No MIDI input devices found.\n");
         g_input2DeviceOpen = false;
         return false;
     }
 
     if (deviceId >= numDevs)
     {
-        printf("Selected MIDI device 2 %u is out of range.\n", deviceId);
+        printf("[SwitchMidiInput2Device] : Selected MIDI device 2 %u is out of range.\n", deviceId);
         g_input2DeviceOpen = false;
         return false;
     }
@@ -1469,11 +1759,11 @@ bool SwitchMidiInput2Device(UINT deviceId)
         UINT currentId = 0;
         if (midiInGetID(hMidiIn2, &currentId) == MMSYSERR_NOERROR)
         {
-            printf("Closing MIDI device 2 [%u].\n", currentId);
+            printf("[SwitchMidiInput2Device] : Closing MIDI device 2 [%u].\n", currentId);
         }
         else
         {
-            printf("Closing current MIDI device 2.\n");
+            printf("[SwitchMidiInput2Device] : Closing current MIDI device 2.\n");
         }
 
         midiInStop(hMidiIn2);
@@ -1490,7 +1780,7 @@ bool RefreshMidiInputDevice()
     UINT numDevs = midiInGetNumDevs();
     if (numDevs == 0)
     {
-        printf("No MIDI input devices found.\n");
+        printf("[RefreshMidiInputDevice] : No MIDI input devices found.\n");
         g_inputDeviceOpen = false;
         return false;
     }
@@ -1514,27 +1804,109 @@ bool SwitchMidiOutputDevice(UINT deviceId)
     UINT numDevs = midiOutGetNumDevs();
     if (numDevs == 0)
     {
-        printf("No MIDI output devices found.\n");
+        printf("[SwitchMidiOutputDevice] : No MIDI output devices found.\n");
         g_outputDeviceOpen = false;
         return false;
     }
 
     if (deviceId >= numDevs)
     {
-        printf("Selected MIDI output device %u is out of range.\n", deviceId);
+        printf("[SwitchMidiOutputDevice] : Selected MIDI output device %u is out of range.\n", deviceId);
         g_outputDeviceOpen = false;
         return false;
     }
 
+    EnterCriticalSection(&g_midiOutLock);
     if (hMidiOut != nullptr)
     {
-        printf("Closing current MIDI output device.\n");
+        printf("[SwitchMidiOutputDevice] : Closing current MIDI output device.\n");
         midiOutReset(hMidiOut);
         midiOutClose(hMidiOut);
         hMidiOut = nullptr;
     }
+    LeaveCriticalSection(&g_midiOutLock);
 
     return OpenMidiOutputDevice(deviceId);
+}
+
+bool SwitchMidiOutput2Device(UINT deviceId)
+{
+    UINT numDevs = midiOutGetNumDevs();
+    if (numDevs == 0)
+    {
+        printf("[SwitchMidiOutput2Device] : No MIDI output devices found.\n");
+        g_output2DeviceOpen = false;
+        return false;
+    }
+
+    if (deviceId >= numDevs)
+    {
+        printf("[SwitchMidiOutput2Device] : Selected MIDI output device 2 %u is out of range.\n", deviceId);
+        g_output2DeviceOpen = false;
+        return false;
+    }
+
+    EnterCriticalSection(&g_midiOutLock);
+    if (hMidiOut2 != nullptr)
+    {
+        printf("[SwitchMidiOutput2Device] : Closing current MIDI output device 2.\n");
+        midiOutReset(hMidiOut2);
+        midiOutClose(hMidiOut2);
+        hMidiOut2 = nullptr;
+    }
+    LeaveCriticalSection(&g_midiOutLock);
+
+    return OpenMidiOutput2Device(deviceId);
+}
+
+void CloseMidiInputDeviceOnly()
+{
+    if (hMidiIn != nullptr)
+    {
+        midiInStop(hMidiIn);
+        midiInReset(hMidiIn);
+        midiInClose(hMidiIn);
+        hMidiIn = nullptr;
+    }
+    g_inputDeviceOpen = false;
+}
+
+void CloseMidiInput2DeviceOnly()
+{
+    if (hMidiIn2 != nullptr)
+    {
+        midiInStop(hMidiIn2);
+        midiInReset(hMidiIn2);
+        midiInClose(hMidiIn2);
+        hMidiIn2 = nullptr;
+    }
+    g_input2DeviceOpen = false;
+}
+
+void CloseMidiOutputDeviceOnly()
+{
+    EnterCriticalSection(&g_midiOutLock);
+    if (hMidiOut != nullptr)
+    {
+        midiOutReset(hMidiOut);
+        midiOutClose(hMidiOut);
+        hMidiOut = nullptr;
+    }
+    LeaveCriticalSection(&g_midiOutLock);
+    g_outputDeviceOpen = false;
+}
+
+void CloseMidiOutput2DeviceOnly()
+{
+    EnterCriticalSection(&g_midiOutLock);
+    if (hMidiOut2 != nullptr)
+    {
+        midiOutReset(hMidiOut2);
+        midiOutClose(hMidiOut2);
+        hMidiOut2 = nullptr;
+    }
+    LeaveCriticalSection(&g_midiOutLock);
+    g_output2DeviceOpen = false;
 }
 
 bool IsMidiInputDeviceOpen()
@@ -1550,6 +1922,16 @@ bool IsMidiInput2DeviceOpen()
 bool IsMidiOutputDeviceOpen()
 {
     return g_outputDeviceOpen.load();
+}
+
+bool IsMidiOutput2DeviceOpen()
+{
+    return g_output2DeviceOpen.load();
+}
+
+void CleanupMidiLocks()
+{
+    DeleteCriticalSection(&g_midiOutLock);
 }
 
 void RefreshMidiDeviceStatus()
@@ -1583,6 +1965,16 @@ void RefreshMidiDeviceStatus()
     {
         g_outputDeviceOpen = false;
     }
+
+    if (hMidiOut2 != nullptr)
+    {
+        UINT currentId = 0;
+        g_output2DeviceOpen = midiOutGetID(hMidiOut2, &currentId) == MMSYSERR_NOERROR;
+    }
+    else
+    {
+        g_output2DeviceOpen = false;
+    }
 }
 
 void clearChannel(int ch)
@@ -1611,9 +2003,9 @@ void CALLBACK MidiInProc(
 
 	if (g_midiRouterEnabled.load() && hMidiOut != nullptr)
 	{
-		// Do not forward command messages (CC ch16 + BF_0x50) to avoid
+		// Do not forward command messages (CC ch16 + BF_0x50/BF_0x51) to avoid
 		// signal loops when the Stream Deck receives on the output port.
-		bool isCommandMsg = (status == CC_ch16 && data1 == BF_0x50);
+		bool isCommandMsg = (status == CC_ch16 && (data1 == BF_0x50 || data1 == BF_0x51));
 		if (!isCommandMsg)
 		{
 			g_midiOutQueue.TryEnqueue(msg);
@@ -1634,7 +2026,7 @@ void CALLBACK MidiInProc(
 		{
 			g_hauptwerkKeyHeld = true;
 				g_hauptwerkKeyLastPressTime = Clock::now();
-				printf("Hauptwerk [FISSATORE] held: true\n");
+				printf("[MidiInProc] : Hauptwerk [FISSATORE] held: true\n");
 		}
 		else if (data2 == AHLBORN_FISSATORE_UP && g_hauptwerkKeyHeld.load())
 		{
@@ -1651,7 +2043,7 @@ void CALLBACK MidiInProc(
 
 			g_hauptwerkKeyLastPressTime = TimePoint{};
 			g_hauptwerkKeyHeld = false;
-			printf("Hauptwerk [FISSATORE] held: false\n");
+			printf("[MidiInProc] : Hauptwerk [FISSATORE] held: false\n");
 		}
 
 		if (data2 == AHLBORN_FISSATORE_UP || data2 == AHLBORN_FISSATORE_DN)
@@ -1746,20 +2138,20 @@ void CALLBACK MidiInProc(
 		if (data1 == 123 || data1 == 120)
 			clearChannel(ch);
        
-		// Esegue Unload organ se viene ricevuto CC ch16, data1= BF_0x50, data2 = 0
-		// oppure Cancel se viene ricevuto CC ch16, data1= BF_0x50, data2 = 0 ma l'organ è in caricamento
-        if (ch == 0x0F && data1 == BF_0x50 && data2 == 0)
-        {
-            printf("Received MIDI message: CC ch16, data1= BF_0x50, data2 = 0\n");
+		// Esegue Unload organ se viene ricevuto CC ch16, data1= BF_0x50 o BF_0x51, data2 = 0
+		// oppure Cancel se l'organo è in caricamento
+		if (ch == 0x0F && (data1 == BF_0x50 || data1 == BF_0x51) && data2 == 0)
+		{
+			printf("[MidiInProc] : Received MIDI message: CC ch16, data1= 0x%02X, data2 = 0\n", data1);
             if (isOrganLoaded)
             {
-                printf("Organo caricato : eseguo Unload organ\n");
+                printf("[MidiInProc] : Organo caricato : eseguo Unload organ\n");
                 g_deferredCmdQueue.TryEnqueue(DeferredCmd::LoadFavoriteOrgan0);
                 break;
             }
 			if (g_isLoadingOrgan )
 			{
-				printf("Organo in caricamento : eseguo Cancel\n");
+				printf("[MidiInProc] : Organo in caricamento : eseguo Cancel\n");
 				HWND hLoadingWnd = FindWindowW(nullptr, L"Loading organ");
 				if (hLoadingWnd )
 				{
@@ -1770,140 +2162,52 @@ void CALLBACK MidiInProc(
 			}
 		}
 		
-		// Esegue Load favorite organ 1 se viene ricevuto CC ch16, data1= BF_0x50, data2 = 1
-        //
-        if (ch == 0x0F && data1 == BF_0x50 && data2 == LOAD_FAVORITE_ORGAN_1)
+		// Esegue Load favorite organ 1..32 se viene ricevuto CC ch16, data1= BF_0x50, data2 = 1..32
+		if (ch == 0x0F && data1 == BF_0x50 && data2 >= 1 && data2 <= 32)
 		{
-			printf("Received MIDI message: CC ch16, data1= BF_0x50, data2 = 1\n");
+			int organIdx = static_cast<int>(data2);
+			printf("[MidiInProc] : Received MIDI message: CC ch16, data1= BF_0x50, data2 = %d\n", organIdx);
 			if (g_isLoadingOrgan)
 			{
-				printf("Organo in caricamento : eseguo Cancel\n");
+				printf("[MidiInProc] : Organo in caricamento : eseguo Cancel\n");
 				HWND hLoadingWnd = FindWindowW(nullptr, L"Loading organ");
 				if (hLoadingWnd)
 				{
 					PostMessageW(hLoadingWnd, WM_KEYDOWN, VK_RETURN, 0);
 					PostMessageW(hLoadingWnd, WM_KEYUP, VK_RETURN, 0);
 				}
-
 			}
 			g_pendingOrganLoad = true;
-			EnqueueMidiOutMessage(CC_ch16 | (BF_0x50 << 8) | (0 << 16));
-			EnqueueMidiOutMessage(CC_ch16 | (BF_0x50 << 8) | (LOAD_FAVORITE_ORGAN_1 << 16));
-			g_deferredCmdQueue.TryEnqueue(DeferredCmd::LoadFavoriteOrgan1);
-            break;
+			SendUnloadOrganMidiMessage();
+			EnqueueMidiOutMessage(CC_ch16 | (BF_0x50 << 8) | (static_cast<DWORD>(organIdx) << 16));
+			DeferredCmd organCmd = static_cast<DeferredCmd>(
+				static_cast<DWORD>(DeferredCmd::LoadFavoriteOrgan1) + static_cast<DWORD>(organIdx) - 1);
+			g_deferredCmdQueue.TryEnqueue(organCmd);
+			break;
 		}
 
-		// Esegue Load favorite organ 2 se viene ricevuto CC ch16, data1= BF_0x50, data2 = 2
-        //
-        if (ch == 0x0F && data1 == BF_0x50 && data2 == LOAD_FAVORITE_ORGAN_2)
+		// Esegue Load installed organ xx se viene ricevuto CC ch16, data1= BF_0x51, data2 = 1..127
+		if (ch == 0x0F && data1 == BF_0x51 && data2 >= 1 && data2 <= 127)
 		{
-			printf("Received MIDI message: CC ch16, data1= BF_0x50, data2 = 2\n");
+			int organIdx = static_cast<int>(data2);
+			printf("[MidiInProc] : Received MIDI message: CC ch16, data1= BF_0x51 (Load installed organ %d)\n", organIdx);
 			if (g_isLoadingOrgan)
 			{
-				printf("Organo in caricamento : eseguo Cancel\n");
+				printf("[MidiInProc] : Organo in caricamento : eseguo Cancel\n");
 				HWND hLoadingWnd = FindWindowW(nullptr, L"Loading organ");
 				if (hLoadingWnd)
 				{
 					PostMessageW(hLoadingWnd, WM_KEYDOWN, VK_RETURN, 0);
 					PostMessageW(hLoadingWnd, WM_KEYUP, VK_RETURN, 0);
 				}
-
 			}
 			g_pendingOrganLoad = true;
-			EnqueueMidiOutMessage(CC_ch16 | (BF_0x50 << 8) | (0 << 16));
-			EnqueueMidiOutMessage(CC_ch16 | (BF_0x50 << 8) | (LOAD_FAVORITE_ORGAN_2 << 16));
-			g_deferredCmdQueue.TryEnqueue(DeferredCmd::LoadFavoriteOrgan2);
-            break;
+			EnqueueMidiOutMessage(CC_ch16 | (BF_0x51 << 8) | (0 << 16));
+			EnqueueMidiOutMessage(CC_ch16 | (BF_0x51 << 8) | (static_cast<DWORD>(organIdx) << 16));
+			g_pendingInstalledOrganIndex.store(organIdx);
+			g_deferredCmdQueue.TryEnqueue(DeferredCmd::LoadInstalledOrgan);
+			break;
 		}
-
-        // Esegue Load favorite organ 3 se viene ricevuto CC ch16, data1= BF_0x50, data2 = 3
-        //
-        if (ch == 0x0F && data1 == BF_0x50 && data2 == LOAD_FAVORITE_ORGAN_3)
-        {
-            printf("Received MIDI message: CC ch16, data1= BF_0x50, data2 = 3\n");
-            if (g_isLoadingOrgan)
-            {
-                printf("Organo in caricamento : eseguo Cancel\n");
-                HWND hLoadingWnd = FindWindowW(nullptr, L"Loading organ");
-                if (hLoadingWnd)
-                {
-                    PostMessageW(hLoadingWnd, WM_KEYDOWN, VK_RETURN, 0);
-                    PostMessageW(hLoadingWnd, WM_KEYUP, VK_RETURN, 0);
-                }
-
-            }
-            g_pendingOrganLoad = true;
-            EnqueueMidiOutMessage(CC_ch16 | (BF_0x50 << 8) | (0 << 16));
-            EnqueueMidiOutMessage(CC_ch16 | (BF_0x50 << 8) | (LOAD_FAVORITE_ORGAN_3 << 16));
-            g_deferredCmdQueue.TryEnqueue(DeferredCmd::LoadFavoriteOrgan3);
-            break;
-        }
-        // Esegue Load favorite organ 4 se viene ricevuto CC ch16, data1= BF_0x50, data2 = 4
-        //
-        if (ch == 0x0F && data1 == BF_0x50 && data2 == LOAD_FAVORITE_ORGAN_4)
-        {
-            printf("Received MIDI message: CC ch16, data1= BF_0x50, data2 = 4\n");
-			if (g_isLoadingOrgan)
-			{
-				printf("Organo in caricamento : eseguo Cancel\n");
-				HWND hLoadingWnd = FindWindowW(nullptr, L"Loading organ");
-				if (hLoadingWnd)
-				{
-					PostMessageW(hLoadingWnd, WM_KEYDOWN, VK_RETURN, 0);
-					PostMessageW(hLoadingWnd, WM_KEYUP, VK_RETURN, 0);
-				}
-
-			}
-			g_pendingOrganLoad = true;
-			EnqueueMidiOutMessage(CC_ch16 | (BF_0x50 << 8) | (0 << 16));
-			EnqueueMidiOutMessage(CC_ch16 | (BF_0x50 << 8) | (LOAD_FAVORITE_ORGAN_4 << 16));
-			g_deferredCmdQueue.TryEnqueue(DeferredCmd::LoadFavoriteOrgan4);
-            break;
-        }
-        // Esegue Load favorite organ 5 se viene ricevuto CC ch16, data1= BF_0x50, data2 = 5
-        //
-        if (ch == 0x0F && data1 == BF_0x50 && data2 == LOAD_FAVORITE_ORGAN_5)
-        {
-            printf("Received MIDI message: CC ch16, data1= BF_0x50, data2 = 5\n");
-            if (g_isLoadingOrgan)
-            {
-                printf("Organo in caricamento : eseguo Cancel\n");
-                HWND hLoadingWnd = FindWindowW(nullptr, L"Loading organ");
-                if (hLoadingWnd)
-                {
-                    PostMessageW(hLoadingWnd, WM_KEYDOWN, VK_RETURN, 0);
-                    PostMessageW(hLoadingWnd, WM_KEYUP, VK_RETURN, 0);
-                }
-
-            }
-            g_pendingOrganLoad = true;
-            EnqueueMidiOutMessage(CC_ch16 | (BF_0x50 << 8) | (0 << 16));
-            EnqueueMidiOutMessage(CC_ch16 | (BF_0x50 << 8) | (LOAD_FAVORITE_ORGAN_5 << 16));
-            g_deferredCmdQueue.TryEnqueue(DeferredCmd::LoadFavoriteOrgan5);
-            break;
-        }
-        // Esegue Load favorite organ 6 se viene ricevuto CC ch16, data1= BF_0x50, data2 = 6
-        //
-        if (ch == 0x0F && data1 == BF_0x50 && data2 == LOAD_FAVORITE_ORGAN_6)
-        {
-            printf("Received MIDI message: CC ch16, data1= BF_0x50, data2 = 6\n");
-            if (g_isLoadingOrgan)
-            {
-                printf("Organo in caricamento : eseguo Cancel\n");
-                HWND hLoadingWnd = FindWindowW(nullptr, L"Loading organ");
-                if (hLoadingWnd)
-                {
-                    PostMessageW(hLoadingWnd, WM_KEYDOWN, VK_RETURN, 0);
-                    PostMessageW(hLoadingWnd, WM_KEYUP, VK_RETURN, 0);
-                }
-
-            }
-            g_pendingOrganLoad = true;
-            EnqueueMidiOutMessage(CC_ch16 | (BF_0x50 << 8) | (0 << 16));
-            EnqueueMidiOutMessage(CC_ch16 | (BF_0x50 << 8) | (LOAD_FAVORITE_ORGAN_6 << 16));
-            g_deferredCmdQueue.TryEnqueue(DeferredCmd::LoadFavoriteOrgan6);
-            break;
-        }
 	}
 		break;
 

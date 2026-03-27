@@ -665,6 +665,181 @@ bool ClickMenuPath(HWND hwndReal, const std::vector<const wchar_t*>& path)
     std::wcout << L"\n[OK] Comando eseguito con successo!\n";
     return true;
 }
+// ============================================================
+// Apre la finestra "Load organ ..." e seleziona l'organo
+// per nome tramite IAccessible.
+// ============================================================
+static bool FindAndInvokeAccessibleByName(IAccessible* pAcc, const std::wstring& targetName, int depth = 0, RECT* outLocation = nullptr)
+{
+    if (!pAcc || depth > 10) return false;
+
+    VARIANT varSelf;
+    varSelf.vt = VT_I4;
+    varSelf.lVal = CHILDID_SELF;
+
+    BSTR bstrName = nullptr;
+    if (SUCCEEDED(pAcc->get_accName(varSelf, &bstrName)) && bstrName)
+    {
+        std::wstring name(bstrName);
+        SysFreeString(bstrName);
+        if (_wcsicmp(name.c_str(), targetName.c_str()) == 0)
+        {
+            std::wcout << L"[LoadOrgan] Trovato \"" << name << L"\", seleziono...\n";
+            // accDoDefaultAction returns S_FALSE for Qt list items and does nothing.
+            // Use accSelect to focus and select the item; the caller will double-click it.
+            HRESULT hrSel = pAcc->accSelect(SELFLAG_TAKEFOCUS | SELFLAG_TAKESELECTION, varSelf);
+            HRESULT hrDef = pAcc->accDoDefaultAction(varSelf);
+            std::wcout << L"[LoadOrgan] accSelect=0x" << std::hex << hrSel
+                << L" accDoDefaultAction=0x" << hrDef << std::dec << L"\n";
+            // Retrieve screen location so the caller can simulate a double-click
+            if (outLocation)
+            {
+                long x = 0, y = 0, w = 0, h = 0;
+                if (SUCCEEDED(pAcc->accLocation(&x, &y, &w, &h, varSelf)))
+                    *outLocation = { x, y, x + w, y + h };
+                else
+                    SetRectEmpty(outLocation);
+            }
+            return true; // item found and selection attempted
+        }
+    }
+
+    long childCount = 0;
+    pAcc->get_accChildCount(&childCount);
+    if (childCount <= 0 || childCount > 2000) return false;
+
+    std::vector<VARIANT> ch(childCount);
+    for (auto& v : ch) VariantInit(&v);
+
+    long obtained = 0;
+    if (FAILED(AccessibleChildren(pAcc, 0, childCount, ch.data(), &obtained)))
+        return false;
+
+    for (long i = 0; i < obtained; ++i)
+    {
+        if (ch[i].vt == VT_DISPATCH && ch[i].pdispVal)
+        {
+            IAccessible* pChild = nullptr;
+            if (SUCCEEDED(ch[i].pdispVal->QueryInterface(IID_IAccessible, (void**)&pChild)))
+            {
+                bool found = FindAndInvokeAccessibleByName(pChild, targetName, depth + 1, outLocation);
+                pChild->Release();
+                ch[i].pdispVal->Release();
+                if (found)
+                {
+                    for (long j = i + 1; j < obtained; ++j) VariantClear(&ch[j]);
+                    return true;
+                }
+            }
+            else
+            {
+                ch[i].pdispVal->Release();
+            }
+        }
+        else
+        {
+            VariantClear(&ch[i]);
+        }
+    }
+    return false;
+}
+
+bool LoadOrganByName(HWND hwndReal, const std::wstring& organName)
+{
+    if (!g_midiRouterEnabled)
+        return false;
+
+    // 1) Snapshot delle finestre top-level esistenti
+    std::vector<HWND> before;
+    EnumWindows([](HWND h, LPARAM lp) -> BOOL {
+        reinterpret_cast<std::vector<HWND>*>(lp)->push_back(h);
+        return TRUE;
+    }, reinterpret_cast<LPARAM>(&before));
+
+    // 2) Apre la finestra tramite il menu "Organ" -> "Load organ ..."
+    std::wcout << L"[LoadOrgan] Apro 'Load organ ...' per \"" << organName << L"\"\n";
+    if (!ClickMenu(hwndReal, L"Organ", L"Load organ ..."))
+    {
+        std::wcout << L"[LoadOrgan] Impossibile aprire 'Load organ ...'\n";
+        return false;
+    }
+
+    // 3) Attende fino a 3s la comparsa di una nuova finestra top-level visibile
+    HWND hDialog = nullptr;
+    for (int i = 0; i < 30 && !hDialog; ++i)
+    {
+        Sleep(100);
+        struct Search { std::vector<HWND>* before; HWND* result; };
+        Search s{ &before, &hDialog };
+        EnumWindows([](HWND h, LPARAM lp) -> BOOL {
+            auto* s = reinterpret_cast<Search*>(lp);
+            if (!IsWindowVisible(h)) return TRUE;
+            for (HWND bh : *s->before)
+                if (bh == h) return TRUE;
+            *s->result = h;
+            return FALSE;
+        }, reinterpret_cast<LPARAM>(&s));
+    }
+
+    if (!hDialog)
+    {
+        std::wcout << L"[LoadOrgan] Finestra di dialogo non trovata\n";
+        return false;
+    }
+
+    wchar_t dlgTitle[256] = {};
+    GetWindowTextW(hDialog, dlgTitle, static_cast<int>(_countof(dlgTitle)));
+    std::wcout << L"[LoadOrgan] Dialogo trovato: HWND=0x" << std::hex << (uintptr_t)hDialog
+        << std::dec << L" \"" << dlgTitle << L"\"\n";
+
+    // 4) Naviga l'albero IAccessible del dialogo e invoca l'organo per nome.
+    // Invece di un'attesa fissa, riprova subito e poi ogni 100ms fino a 5 volte
+    // (max 500ms) per attendere che Qt popoli la lista IAccessible.
+    bool found = false;
+    RECT itemRect = {};
+    for (int attempt = 0; attempt < 5 && !found; ++attempt)
+    {
+        if (attempt > 0)
+            Sleep(100);
+        IAccessible* pRoot = nullptr;
+        if (SUCCEEDED(AccessibleObjectFromWindow(hDialog, OBJID_CLIENT,
+                IID_IAccessible, (void**)&pRoot)) && pRoot)
+        {
+            found = FindAndInvokeAccessibleByName(pRoot, organName, 0, &itemRect);
+            pRoot->Release();
+        }
+    }
+
+    if (found)
+    {
+        // The item has already been focused and selected via accSelect.
+        // Send ENTER to confirm the selection — this is more reliable
+        // than simulating a double-click on Qt dialogs because it
+        // doesn't depend on cursor position or window hierarchy.
+        Sleep(100);
+        SetForegroundWindow(hDialog);
+        Sleep(100);
+
+        INPUT key[4] = {};
+        key[0].type = INPUT_KEYBOARD;
+        key[0].ki.wVk = VK_RETURN;
+        key[1].type = INPUT_KEYBOARD;
+        key[1].ki.wVk = VK_RETURN;
+        key[1].ki.dwFlags = KEYEVENTF_KEYUP;
+        SendInput(2, key, sizeof(INPUT));
+        std::wcout << L"[LoadOrgan] SendInput VK_RETURN inviato\n";
+    }
+    else
+    {
+        std::wcout << L"[LoadOrgan] \"" << organName << L"\" non trovato nel dialogo\n";
+        // Chiude il dialogo senza caricare
+        PostMessageW(hDialog, WM_KEYDOWN, VK_ESCAPE, 0);
+        PostMessageW(hDialog, WM_KEYUP,   VK_ESCAPE, 0);
+    }
+
+    return found;
+}
+
 /*
 // ============================================================
 // MAIN

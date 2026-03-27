@@ -1,6 +1,7 @@
 #include "Xml.h"
 #include "Midi.h"
 #include "TrayIcon.h"
+#include "StreamDeck.h"
 
 #include <string>
 #include <set>
@@ -35,13 +36,50 @@ namespace
         return dir + L"\\Settings.xml";
     }
 
+    bool TryGetTagEnabledAttribute(const std::wstring& xml, const std::wstring& tagName, bool& enabled)
+    {
+        std::wstring search = L"<" + tagName;
+        size_t pos = xml.find(search);
+        if (pos == std::wstring::npos) { enabled = true; return true; }
+        size_t tagEnd = xml.find(L'>', pos);
+        if (tagEnd == std::wstring::npos) return false;
+        std::wstring tagContent = xml.substr(pos, tagEnd - pos);
+        std::wstring attr = L"enabled=\"";
+        size_t attrPos = tagContent.find(attr);
+        if (attrPos == std::wstring::npos) { enabled = true; return true; }
+        attrPos += attr.size();
+        size_t attrEnd = tagContent.find(L'"', attrPos);
+        if (attrEnd == std::wstring::npos) return false;
+        enabled = (tagContent.substr(attrPos, attrEnd - attrPos) != L"0");
+        return true;
+    }
+
+    struct DeviceEnabledStates
+    {
+        bool input1  = true;
+        bool input2  = true;
+        bool output1 = true;
+        bool output2 = true;
+    };
+
     // Forward declarations.
-    bool WriteSettingsXml(const std::wstring& inputDeviceName, const std::wstring& input2DeviceName, const std::wstring& outputDeviceName, bool routerEnabled, bool closeSettingsOnDisconnect, bool showDebugConsole);
+    bool WriteSettingsXml(const std::wstring& inputDeviceName, const std::wstring& input2DeviceName, const std::wstring& outputDeviceName, const std::wstring& output2DeviceName, bool routerEnabled, bool closeSettingsOnDisconnect, bool showDebugConsole, bool checkForUpdateOnStart, const DeviceEnabledStates& devEnabled);
     std::wstring ReadHauptwerkStandbyOrgans();
+    std::wstring ReadHauptwerkInstalledOrgans();
 
     // Cached standby-organ XML fragment (read once from the Hauptwerk config).
     std::wstring s_cachedStandbyOrgans;
     bool s_standbyOrgansLoaded = false;
+
+    // Cached installed-organs XML fragment (scanned once from OrganDefinitions).
+    std::wstring s_cachedInstalledOrgans;
+    bool s_installedOrgansLoaded = false;
+
+    // Cached Stream Deck settings (persisted to <StreamDeck> in Settings.xml).
+    std::wstring s_cachedStreamDeckCC = L"81";
+    std::wstring s_cachedStreamDeckMidiOut;
+    std::wstring s_cachedStreamDeckMidiIn;
+    bool s_streamDeckSettingsLoaded = false;
 
     // Cached Hauptwerk folder paths (detected once at startup).
     std::wstring s_rootHauptwerkApp;
@@ -59,6 +97,15 @@ namespace
         }
     }
 
+    void EnsureInstalledOrgansLoaded()
+    {
+        if (!s_installedOrgansLoaded)
+        {
+            s_installedOrgansLoaded = true;
+            s_cachedInstalledOrgans = ReadHauptwerkInstalledOrgans();
+        }
+    }
+
     bool TryReadSettingsXml(std::wstring& xml)
     {
         std::wstring settingsFile = GetSettingsFilePath();
@@ -71,7 +118,7 @@ namespace
             if (err == ERROR_FILE_NOT_FOUND || err == ERROR_PATH_NOT_FOUND)
             {
                 // Ensure directory exists and write defaults (device 0, output 0, router enabled, auto-close enabled, debug console hidden)
-                WriteSettingsXml(L"", L"", L"", true, true, false);
+                WriteSettingsXml(L"", L"", L"", L"", true, true, false, true, DeviceEnabledStates{});
                 fileHandle = CreateFileW(settingsFile.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING,
                     FILE_ATTRIBUTE_NORMAL, nullptr);
                 if (fileHandle == INVALID_HANDLE_VALUE)
@@ -512,10 +559,157 @@ namespace
 			}
 		}
 
+		// Extract sborg09 .. sborg32
+		constexpr wchar_t kSuffix[] = L".Organ_Hauptwerk_xml";
+		constexpr size_t kSuffixLen = (sizeof(kSuffix) / sizeof(wchar_t)) - 1;
+		for (int i = 9; i <= 32; ++i)
+		{
+			std::wstring tagName = std::wstring(L"sborg") + (i < 10 ? L"0" : L"") + std::to_wstring(i);
+			std::wstring startTag = L"<" + tagName + L">";
+			std::wstring endTag = L"</" + tagName + L">";
+			std::wstring value;
+			if (TryGetTagStringValue(generalSection, startTag, endTag, value) && !value.empty())
+			{
+				if (value.size() > kSuffixLen &&
+					value.compare(value.size() - kSuffixLen, kSuffixLen, kSuffix) == 0)
+				{
+					value = value.substr(0, value.size() - kSuffixLen);
+				}
+				else
+				{
+					size_t dot = value.rfind(L'.');
+					if (dot != std::wstring::npos)
+						value = value.substr(0, dot);
+				}
+
+				result += L"    <" + tagName + L">" + value + L"</" + tagName + L">\r\n";
+				printf("ReadHauptwerkStandbyOrgans: %S = %S\n", tagName.c_str(), value.c_str());
+			}
+		}
+
 		return result;
 	}
 
-	bool WriteSettingsXml(const std::wstring& inputDeviceName, const std::wstring& input2DeviceName, const std::wstring& outputDeviceName, bool routerEnabled, bool closeSettingsOnDisconnect, bool showDebugConsole)
+	// Scan {RootFolder_HauptwerkSampleSetsAndComponents}\OrganDefinitions for
+	// installed organ files (*.Organ_Hauptwerk_xml) and return an XML fragment
+	// with one <Organ id="NN">name</Organ> entry per file.
+	std::wstring ReadHauptwerkInstalledOrgans()
+	{
+		std::wstring sampleSetsRoot = s_rootHauptwerkSampleSets;
+		if (sampleSetsRoot.empty())
+		{
+			// Fallback: try to load from Settings.xml in case the cache
+			// has not been populated yet.
+			std::wstring xml;
+			if (TryReadSettingsXml(xml))
+			{
+				std::wstring opts;
+				if (TryGetSection(xml, L"Options", opts))
+					TryGetTagStringValue(opts,
+						L"<RootFolder_HauptwerkSampleSetsAndComponents>",
+						L"</RootFolder_HauptwerkSampleSetsAndComponents>",
+						sampleSetsRoot);
+			}
+		}
+		if (sampleSetsRoot.empty())
+		{
+			printf("ReadHauptwerkInstalledOrgans: RootFolder_HauptwerkSampleSetsAndComponents not configured.\n");
+			return {};
+		}
+
+		// Remove trailing backslash if present.
+		if (sampleSetsRoot.back() == L'\\' || sampleSetsRoot.back() == L'/')
+			sampleSetsRoot.pop_back();
+
+		std::wstring searchPath = sampleSetsRoot + L"\\OrganDefinitions\\*";
+		printf("ReadHauptwerkInstalledOrgans: scanning %S\n", searchPath.c_str());
+
+		WIN32_FIND_DATAW fd = {};
+		HANDLE hFind = FindFirstFileW(searchPath.c_str(), &fd);
+		if (hFind == INVALID_HANDLE_VALUE)
+		{
+			printf("ReadHauptwerkInstalledOrgans: no files found (error %lu)\n", GetLastError());
+			return {};
+		}
+
+		constexpr wchar_t kSuffix[] = L".Organ_Hauptwerk_xml";
+		constexpr size_t kSuffixLen = (sizeof(kSuffix) / sizeof(wchar_t)) - 1;
+
+		std::wstring result;
+		int id = 1;
+		do
+		{
+			if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)
+				continue;
+
+			std::wstring name(fd.cFileName);
+			if (name.size() <= kSuffixLen ||
+				name.compare(name.size() - kSuffixLen, kSuffixLen, kSuffix) != 0)
+				continue;
+
+			name = name.substr(0, name.size() - kSuffixLen);
+
+			// Read Identification_Name from inside the organ definition XML file
+			std::wstring displayName;
+			{
+				std::wstring organFilePath = sampleSetsRoot + L"\\OrganDefinitions\\" + std::wstring(fd.cFileName);
+				HANDLE fh = CreateFileW(organFilePath.c_str(), GENERIC_READ, FILE_SHARE_READ,
+					nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+				if (fh != INVALID_HANDLE_VALUE)
+				{
+					DWORD fileSize = GetFileSize(fh, nullptr);
+					if (fileSize != INVALID_FILE_SIZE && fileSize > 0)
+					{
+						// Read only the first 128KB — Identification_Name is near the start of the file
+						DWORD readSize = (std::min)(fileSize, static_cast<DWORD>(131072));
+						std::string raw(readSize, '\0');
+						DWORD bytesRead = 0;
+						if (ReadFile(fh, raw.data(), readSize, &bytesRead, nullptr) && bytesRead > 0)
+						{
+							int wideSize = MultiByteToWideChar(CP_UTF8, 0, raw.data(),
+								static_cast<int>(bytesRead), nullptr, 0);
+							if (wideSize > 0)
+							{
+								std::wstring hwXml(wideSize, L'\0');
+								MultiByteToWideChar(CP_UTF8, 0, raw.data(),
+									static_cast<int>(bytesRead), hwXml.data(), wideSize);
+								TryGetTagStringValue(hwXml,
+									L"<Identification_Name>",
+									L"</Identification_Name>",
+									displayName);
+							}
+						}
+					}
+					CloseHandle(fh);
+				}
+			}
+
+			std::wstring idStr = (id < 10 ? L"0" : L"") + std::to_wstring(id);
+			std::wstring displayAttr = displayName.empty() ? L"" : L" displayName=\"" + displayName + L"\"";
+			result += L"    <Organ id=\"" + idStr + L"\"" + displayAttr + L">" + name + L"</Organ>\r\n";
+			printf("ReadHauptwerkInstalledOrgans: [%02d] %S (displayName: %S)\n", id, name.c_str(),
+				displayName.empty() ? L"(none)" : displayName.c_str());
+			++id;
+		} while (FindNextFileW(hFind, &fd));
+
+		FindClose(hFind);
+		return result;
+	}
+
+	void EnsureStreamDeckSettingsLoaded()
+	{
+		if (s_streamDeckSettingsLoaded) return;
+		s_streamDeckSettingsLoaded = true;
+		std::wstring xml;
+		if (!TryReadSettingsXml(xml)) return;
+		std::wstring section;
+		if (!TryGetSection(xml, L"StreamDeck", section)) return;
+		TryGetTagStringValue(section, L"<CC>", L"</CC>", s_cachedStreamDeckCC);
+		TryGetTagStringValue(section, L"<MidiOut>", L"</MidiOut>", s_cachedStreamDeckMidiOut);
+		TryGetTagStringValue(section, L"<MidiIn>", L"</MidiIn>", s_cachedStreamDeckMidiIn);
+	}
+
+	bool WriteSettingsXml(const std::wstring& inputDeviceName, const std::wstring& input2DeviceName, const std::wstring& outputDeviceName, const std::wstring& output2DeviceName, bool routerEnabled, bool closeSettingsOnDisconnect, bool showDebugConsole, bool checkForUpdateOnStart, const DeviceEnabledStates& devEnabled)
 	{
 		std::wstring settingsDir = GetSettingsDirPath();
 		if (!CreateDirectoryW(settingsDir.c_str(), nullptr))
@@ -549,7 +743,7 @@ namespace
 		}
 
 		// Resolve current device indices so we can store them as id attributes.
-		auto buildDeviceTag = [](const wchar_t* tag, const std::wstring& name, bool isOutput) -> std::wstring
+		auto buildDeviceTag = [](const wchar_t* tag, const std::wstring& name, bool isOutput, bool enabled) -> std::wstring
 		{
 			UINT idx = 0;
 			bool found = false;
@@ -559,7 +753,9 @@ namespace
 			s += tag;
 			if (found)
 				s += L" id=\"" + std::to_wstring(idx) + L"\"";
-			s += L">";
+			s += L" enabled=\"";
+			s += enabled ? L"1" : L"0";
+			s += L"\">";
 			s += name;
 			s += L"</";
 			s += tag;
@@ -571,19 +767,28 @@ namespace
 		EnsureStandbyOrgansLoaded();
 		const std::wstring& standbyOrgans = s_cachedStandbyOrgans;
 
+		// Ensure installed organs are loaded (cached on first call).
+		EnsureInstalledOrgansLoaded();
+		const std::wstring& installedOrgans = s_cachedInstalledOrgans;
+
+		// Ensure Stream Deck settings are loaded (cached on first call).
+		EnsureStreamDeckSettingsLoaded();
+
 		std::wstring xml = L"<?xml version=\"1.0\" encoding=\"utf-8\"?>\r\n"
 			L"<Settings>\r\n"
 			L"  <Midi>\r\n"
 			L"    <SettingsDevices>\r\n"
-			+ buildDeviceTag(L"MidiInputDevice01", inputDeviceName, false)
-			+ buildDeviceTag(L"MidiInputDevice02", input2DeviceName, false)
-			+ buildDeviceTag(L"MidiOutputDevice01", outputDeviceName, true) +
+			+ buildDeviceTag(L"MidiInputDevice01", inputDeviceName, false, devEnabled.input1)
+				+ buildDeviceTag(L"MidiInputDevice02", input2DeviceName, false, devEnabled.input2)
+				+ buildDeviceTag(L"MidiOutputDevice01", outputDeviceName, true, devEnabled.output1)
+				+ buildDeviceTag(L"MidiOutputDevice02", output2DeviceName, true, devEnabled.output2) +
 			L"    </SettingsDevices>\r\n"
 			L"    <MidiRouterEnabled>" + std::to_wstring(routerEnabled ? 1 : 0) + L"</MidiRouterEnabled>\r\n"
 			L"  </Midi>\r\n"
 			L"  <Options>\r\n"
 			L"    <CloseSettingsOnDisconnect>" + std::to_wstring(closeSettingsOnDisconnect ? 1 : 0) + L"</CloseSettingsOnDisconnect>\r\n"
 			L"    <ShowDebugConsole>" + std::to_wstring(showDebugConsole ? 1 : 0) + L"</ShowDebugConsole>\r\n"
+			L"    <CheckForUpdateOnStart>" + std::to_wstring(checkForUpdateOnStart ? 1 : 0) + L"</CheckForUpdateOnStart>\r\n"
 			L"    <RootFolder_HauptwerkApplication>" + s_rootHauptwerkApp + L"</RootFolder_HauptwerkApplication>\r\n"
 			L"    <RootFolder_HauptwerkUserData>" + s_rootHauptwerkUserData + L"</RootFolder_HauptwerkUserData>\r\n"
 			L"    <RootFolder_HauptwerkSampleSetsAndComponents>" + s_rootHauptwerkSampleSets + L"</RootFolder_HauptwerkSampleSetsAndComponents>\r\n"
@@ -595,6 +800,13 @@ namespace
 			L"  </CurrentMidiOutputDevices>\r\n"
 			L"  <StandbyeOrgans>\r\n" + standbyOrgans +
 			L"  </StandbyeOrgans>\r\n"
+			L"  <InstalledOrgans>\r\n" + installedOrgans +
+			L"  </InstalledOrgans>\r\n"
+			L"  <StreamDeck>\r\n"
+			L"    <CC>" + s_cachedStreamDeckCC + L"</CC>\r\n"
+			L"    <MidiOut>" + s_cachedStreamDeckMidiOut + L"</MidiOut>\r\n"
+			L"    <MidiIn>" + s_cachedStreamDeckMidiIn + L"</MidiIn>\r\n"
+			L"  </StreamDeck>\r\n"
 			L"  <Organ_Info>\r\n"
 			L"  </Organ_Info>\r\n"
 			L"</Settings>\r\n";
@@ -626,7 +838,8 @@ namespace
 }
 bool SaveSelectedDeviceId(UINT deviceId)
 {
-    std::wstring input2Name, outputName;
+    std::wstring input2Name, outputName, output2Name;
+    DeviceEnabledStates devEnabled;
     std::wstring xml;
     if (TryReadSettingsXml(xml))
     {
@@ -635,6 +848,11 @@ bool SaveSelectedDeviceId(UINT deviceId)
         {
             TryGetTagStringValue(devicesSection, L"<MidiInputDevice02>", L"</MidiInputDevice02>", input2Name);
             TryGetTagStringValue(devicesSection, L"<MidiOutputDevice01>", L"</MidiOutputDevice01>", outputName);
+            TryGetTagStringValue(devicesSection, L"<MidiOutputDevice02>", L"</MidiOutputDevice02>", output2Name);
+            TryGetTagEnabledAttribute(devicesSection, L"MidiInputDevice01", devEnabled.input1);
+            TryGetTagEnabledAttribute(devicesSection, L"MidiInputDevice02", devEnabled.input2);
+            TryGetTagEnabledAttribute(devicesSection, L"MidiOutputDevice01", devEnabled.output1);
+            TryGetTagEnabledAttribute(devicesSection, L"MidiOutputDevice02", devEnabled.output2);
         }
     }
     bool routerEnabled = false;
@@ -643,12 +861,15 @@ bool SaveSelectedDeviceId(UINT deviceId)
     LoadCloseSettingsOnDisconnect(closeSettingsOnDisconnect);
     bool showDebugConsole = true;
     LoadShowDebugConsole(showDebugConsole);
-    return WriteSettingsXml(GetMidiInputDeviceName(deviceId), input2Name, outputName, routerEnabled, closeSettingsOnDisconnect, showDebugConsole);
+    bool checkForUpdateOnStart = true;
+    LoadCheckForUpdateOnStart(checkForUpdateOnStart);
+    return WriteSettingsXml(GetMidiInputDeviceName(deviceId), input2Name, outputName, output2Name, routerEnabled, closeSettingsOnDisconnect, showDebugConsole, checkForUpdateOnStart, devEnabled);
 }
 
 bool SaveSelectedOutputDeviceId(UINT deviceId)
 {
-    std::wstring inputName, input2Name;
+    std::wstring inputName, input2Name, output2Name;
+    DeviceEnabledStates devEnabled;
     std::wstring xml;
     if (TryReadSettingsXml(xml))
     {
@@ -657,6 +878,11 @@ bool SaveSelectedOutputDeviceId(UINT deviceId)
         {
             TryGetTagStringValue(devicesSection, L"<MidiInputDevice01>", L"</MidiInputDevice01>", inputName);
             TryGetTagStringValue(devicesSection, L"<MidiInputDevice02>", L"</MidiInputDevice02>", input2Name);
+            TryGetTagStringValue(devicesSection, L"<MidiOutputDevice02>", L"</MidiOutputDevice02>", output2Name);
+            TryGetTagEnabledAttribute(devicesSection, L"MidiInputDevice01", devEnabled.input1);
+            TryGetTagEnabledAttribute(devicesSection, L"MidiInputDevice02", devEnabled.input2);
+            TryGetTagEnabledAttribute(devicesSection, L"MidiOutputDevice01", devEnabled.output1);
+            TryGetTagEnabledAttribute(devicesSection, L"MidiOutputDevice02", devEnabled.output2);
         }
     }
     bool routerEnabled = false;
@@ -665,12 +891,15 @@ bool SaveSelectedOutputDeviceId(UINT deviceId)
     LoadCloseSettingsOnDisconnect(closeSettingsOnDisconnect);
     bool showDebugConsole = true;
     LoadShowDebugConsole(showDebugConsole);
-    return WriteSettingsXml(inputName, input2Name, GetMidiOutputDeviceName(deviceId), routerEnabled, closeSettingsOnDisconnect, showDebugConsole);
+    bool checkForUpdateOnStart = true;
+    LoadCheckForUpdateOnStart(checkForUpdateOnStart);
+    return WriteSettingsXml(inputName, input2Name, GetMidiOutputDeviceName(deviceId), output2Name, routerEnabled, closeSettingsOnDisconnect, showDebugConsole, checkForUpdateOnStart, devEnabled);
 }
 
 bool SaveMidiRouterEnabled(bool enabled)
 {
-    std::wstring inputName, input2Name, outputName;
+    std::wstring inputName, input2Name, outputName, output2Name;
+    DeviceEnabledStates devEnabled;
     std::wstring xml;
     if (TryReadSettingsXml(xml))
     {
@@ -680,18 +909,26 @@ bool SaveMidiRouterEnabled(bool enabled)
             TryGetTagStringValue(devicesSection, L"<MidiInputDevice01>", L"</MidiInputDevice01>", inputName);
             TryGetTagStringValue(devicesSection, L"<MidiInputDevice02>", L"</MidiInputDevice02>", input2Name);
             TryGetTagStringValue(devicesSection, L"<MidiOutputDevice01>", L"</MidiOutputDevice01>", outputName);
+            TryGetTagStringValue(devicesSection, L"<MidiOutputDevice02>", L"</MidiOutputDevice02>", output2Name);
+            TryGetTagEnabledAttribute(devicesSection, L"MidiInputDevice01", devEnabled.input1);
+            TryGetTagEnabledAttribute(devicesSection, L"MidiInputDevice02", devEnabled.input2);
+            TryGetTagEnabledAttribute(devicesSection, L"MidiOutputDevice01", devEnabled.output1);
+            TryGetTagEnabledAttribute(devicesSection, L"MidiOutputDevice02", devEnabled.output2);
         }
     }
     bool closeSettingsOnDisconnect = false;
     LoadCloseSettingsOnDisconnect(closeSettingsOnDisconnect);
     bool showDebugConsole = true;
     LoadShowDebugConsole(showDebugConsole);
-    return WriteSettingsXml(inputName, input2Name, outputName, enabled, closeSettingsOnDisconnect, showDebugConsole);
+    bool checkForUpdateOnStart = true;
+    LoadCheckForUpdateOnStart(checkForUpdateOnStart);
+    return WriteSettingsXml(inputName, input2Name, outputName, output2Name, enabled, closeSettingsOnDisconnect, showDebugConsole, checkForUpdateOnStart, devEnabled);
 }
 
 bool SaveCloseSettingsOnDisconnect(bool enabled)
 {
-    std::wstring inputName, input2Name, outputName;
+    std::wstring inputName, input2Name, outputName, output2Name;
+    DeviceEnabledStates devEnabled;
     std::wstring xml;
     if (TryReadSettingsXml(xml))
     {
@@ -701,13 +938,20 @@ bool SaveCloseSettingsOnDisconnect(bool enabled)
             TryGetTagStringValue(devicesSection, L"<MidiInputDevice01>", L"</MidiInputDevice01>", inputName);
             TryGetTagStringValue(devicesSection, L"<MidiInputDevice02>", L"</MidiInputDevice02>", input2Name);
             TryGetTagStringValue(devicesSection, L"<MidiOutputDevice01>", L"</MidiOutputDevice01>", outputName);
+            TryGetTagStringValue(devicesSection, L"<MidiOutputDevice02>", L"</MidiOutputDevice02>", output2Name);
+            TryGetTagEnabledAttribute(devicesSection, L"MidiInputDevice01", devEnabled.input1);
+            TryGetTagEnabledAttribute(devicesSection, L"MidiInputDevice02", devEnabled.input2);
+            TryGetTagEnabledAttribute(devicesSection, L"MidiOutputDevice01", devEnabled.output1);
+            TryGetTagEnabledAttribute(devicesSection, L"MidiOutputDevice02", devEnabled.output2);
         }
     }
     bool routerEnabled = false;
     LoadMidiRouterEnabled(routerEnabled);
     bool showDebugConsole = true;
     LoadShowDebugConsole(showDebugConsole);
-    return WriteSettingsXml(inputName, input2Name, outputName, routerEnabled, enabled, showDebugConsole);
+    bool checkForUpdateOnStart = true;
+    LoadCheckForUpdateOnStart(checkForUpdateOnStart);
+    return WriteSettingsXml(inputName, input2Name, outputName, output2Name, routerEnabled, enabled, showDebugConsole, checkForUpdateOnStart, devEnabled);
 }
 
 bool LoadSelectedDeviceId(UINT& deviceId)
@@ -733,7 +977,8 @@ bool LoadSelectedDeviceId(UINT& deviceId)
 
 bool SaveSelectedInput2DeviceId(UINT deviceId)
 {
-    std::wstring inputName, outputName;
+    std::wstring inputName, outputName, output2Name;
+    DeviceEnabledStates devEnabled;
     std::wstring xml;
     if (TryReadSettingsXml(xml))
     {
@@ -742,6 +987,11 @@ bool SaveSelectedInput2DeviceId(UINT deviceId)
         {
             TryGetTagStringValue(devicesSection, L"<MidiInputDevice01>", L"</MidiInputDevice01>", inputName);
             TryGetTagStringValue(devicesSection, L"<MidiOutputDevice01>", L"</MidiOutputDevice01>", outputName);
+            TryGetTagStringValue(devicesSection, L"<MidiOutputDevice02>", L"</MidiOutputDevice02>", output2Name);
+            TryGetTagEnabledAttribute(devicesSection, L"MidiInputDevice01", devEnabled.input1);
+            TryGetTagEnabledAttribute(devicesSection, L"MidiInputDevice02", devEnabled.input2);
+            TryGetTagEnabledAttribute(devicesSection, L"MidiOutputDevice01", devEnabled.output1);
+            TryGetTagEnabledAttribute(devicesSection, L"MidiOutputDevice02", devEnabled.output2);
         }
     }
     bool routerEnabled = false;
@@ -750,7 +1000,9 @@ bool SaveSelectedInput2DeviceId(UINT deviceId)
     LoadCloseSettingsOnDisconnect(closeSettingsOnDisconnect);
     bool showDebugConsole = true;
     LoadShowDebugConsole(showDebugConsole);
-    return WriteSettingsXml(inputName, GetMidiInputDeviceName(deviceId), outputName, routerEnabled, closeSettingsOnDisconnect, showDebugConsole);
+    bool checkForUpdateOnStart = true;
+    LoadCheckForUpdateOnStart(checkForUpdateOnStart);
+    return WriteSettingsXml(inputName, GetMidiInputDeviceName(deviceId), outputName, output2Name, routerEnabled, closeSettingsOnDisconnect, showDebugConsole, checkForUpdateOnStart, devEnabled);
 }
 
 bool LoadSelectedInput2DeviceId(UINT& deviceId)
@@ -871,7 +1123,8 @@ bool LoadShowDebugConsole(bool& enabled)
 
 bool SaveShowDebugConsole(bool enabled)
 {
-    std::wstring inputName, input2Name, outputName;
+    std::wstring inputName, input2Name, outputName, output2Name;
+    DeviceEnabledStates devEnabled;
     std::wstring xml;
     if (TryReadSettingsXml(xml))
     {
@@ -881,21 +1134,47 @@ bool SaveShowDebugConsole(bool enabled)
             TryGetTagStringValue(devicesSection, L"<MidiInputDevice01>", L"</MidiInputDevice01>", inputName);
             TryGetTagStringValue(devicesSection, L"<MidiInputDevice02>", L"</MidiInputDevice02>", input2Name);
             TryGetTagStringValue(devicesSection, L"<MidiOutputDevice01>", L"</MidiOutputDevice01>", outputName);
+            TryGetTagStringValue(devicesSection, L"<MidiOutputDevice02>", L"</MidiOutputDevice02>", output2Name);
+            TryGetTagEnabledAttribute(devicesSection, L"MidiInputDevice01", devEnabled.input1);
+            TryGetTagEnabledAttribute(devicesSection, L"MidiInputDevice02", devEnabled.input2);
+            TryGetTagEnabledAttribute(devicesSection, L"MidiOutputDevice01", devEnabled.output1);
+            TryGetTagEnabledAttribute(devicesSection, L"MidiOutputDevice02", devEnabled.output2);
         }
     }
     bool routerEnabled = false;
     LoadMidiRouterEnabled(routerEnabled);
     bool closeSettingsOnDisconnect = false;
     LoadCloseSettingsOnDisconnect(closeSettingsOnDisconnect);
-    return WriteSettingsXml(inputName, input2Name, outputName, routerEnabled, closeSettingsOnDisconnect, enabled);
+    bool checkForUpdateOnStart = true;
+    LoadCheckForUpdateOnStart(checkForUpdateOnStart);
+    return WriteSettingsXml(inputName, input2Name, outputName, output2Name, routerEnabled, closeSettingsOnDisconnect, enabled, checkForUpdateOnStart, devEnabled);
 }
 
-void RefreshSettingsFile()
+bool LoadCheckForUpdateOnStart(bool& enabled)
 {
-    std::wstring inputName, input2Name, outputName;
-    bool routerEnabled = false;
-    bool closeSettingsOnDisconnect = false;
+    std::wstring xml;
+    if (!TryReadSettingsXml(xml))
+        return false;
 
+    std::wstring optionsSection;
+    if (!TryGetSection(xml, L"Options", optionsSection))
+        return false;
+
+    UINT value = 1;
+    if (!TryGetTagValue(optionsSection, L"<CheckForUpdateOnStart>", L"</CheckForUpdateOnStart>", value))
+    {
+        enabled = true;
+        return true;
+    }
+
+    enabled = value != 0;
+    return true;
+}
+
+bool SaveCheckForUpdateOnStart(bool enabled)
+{
+    std::wstring inputName, input2Name, outputName, output2Name;
+    DeviceEnabledStates devEnabled;
     std::wstring xml;
     if (TryReadSettingsXml(xml))
     {
@@ -905,6 +1184,43 @@ void RefreshSettingsFile()
             TryGetTagStringValue(devicesSection, L"<MidiInputDevice01>", L"</MidiInputDevice01>", inputName);
             TryGetTagStringValue(devicesSection, L"<MidiInputDevice02>", L"</MidiInputDevice02>", input2Name);
             TryGetTagStringValue(devicesSection, L"<MidiOutputDevice01>", L"</MidiOutputDevice01>", outputName);
+            TryGetTagStringValue(devicesSection, L"<MidiOutputDevice02>", L"</MidiOutputDevice02>", output2Name);
+            TryGetTagEnabledAttribute(devicesSection, L"MidiInputDevice01", devEnabled.input1);
+            TryGetTagEnabledAttribute(devicesSection, L"MidiInputDevice02", devEnabled.input2);
+            TryGetTagEnabledAttribute(devicesSection, L"MidiOutputDevice01", devEnabled.output1);
+            TryGetTagEnabledAttribute(devicesSection, L"MidiOutputDevice02", devEnabled.output2);
+        }
+    }
+    bool routerEnabled = false;
+    LoadMidiRouterEnabled(routerEnabled);
+    bool closeSettingsOnDisconnect = false;
+    LoadCloseSettingsOnDisconnect(closeSettingsOnDisconnect);
+    bool showDebugConsole = true;
+    LoadShowDebugConsole(showDebugConsole);
+    return WriteSettingsXml(inputName, input2Name, outputName, output2Name, routerEnabled, closeSettingsOnDisconnect, showDebugConsole, enabled, devEnabled);
+}
+
+void RefreshSettingsFile()
+{
+    std::wstring inputName, input2Name, outputName, output2Name;
+    bool routerEnabled = false;
+    bool closeSettingsOnDisconnect = false;
+
+    DeviceEnabledStates devEnabled;
+    std::wstring xml;
+    if (TryReadSettingsXml(xml))
+    {
+        std::wstring midiSection, devicesSection;
+        if (TryGetSection(xml, L"Midi", midiSection) && TryGetSection(midiSection, L"SettingsDevices", devicesSection))
+        {
+            TryGetTagStringValue(devicesSection, L"<MidiInputDevice01>", L"</MidiInputDevice01>", inputName);
+            TryGetTagStringValue(devicesSection, L"<MidiInputDevice02>", L"</MidiInputDevice02>", input2Name);
+            TryGetTagStringValue(devicesSection, L"<MidiOutputDevice01>", L"</MidiOutputDevice01>", outputName);
+            TryGetTagStringValue(devicesSection, L"<MidiOutputDevice02>", L"</MidiOutputDevice02>", output2Name);
+            TryGetTagEnabledAttribute(devicesSection, L"MidiInputDevice01", devEnabled.input1);
+            TryGetTagEnabledAttribute(devicesSection, L"MidiInputDevice02", devEnabled.input2);
+            TryGetTagEnabledAttribute(devicesSection, L"MidiOutputDevice01", devEnabled.output1);
+            TryGetTagEnabledAttribute(devicesSection, L"MidiOutputDevice02", devEnabled.output2);
         }
     }
 
@@ -977,9 +1293,10 @@ void RefreshSettingsFile()
 
     struct DeviceCheck { const wchar_t* label; const std::wstring& name; bool isOutput; };
     DeviceCheck checks[] = {
-        { L"MidiInputDevice01",  inputName,  false },
-        { L"MidiInputDevice02",  input2Name, false },
-        { L"MidiOutputDevice01", outputName, true  },
+        { L"MidiInputDevice01",  inputName,   false },
+        { L"MidiInputDevice02",  input2Name,  false },
+        { L"MidiOutputDevice01", outputName,  true  },
+        { L"MidiOutputDevice02", output2Name, true  },
     };
 
     std::wstring missingMsg;
@@ -1297,6 +1614,11 @@ void RefreshSettingsFile()
                 printf("Reopening MIDI output device 01: [%S]\n", outputName.c_str());
                 SwitchMidiOutputDevice(idx);
             }
+            if (!output2Name.empty() && FindMidiOutputDeviceIndex(output2Name, idx))
+            {
+                printf("Reopening MIDI output device 02: [%S]\n", output2Name.c_str());
+                SwitchMidiOutput2Device(idx);
+            }
         }
 
         // Update the snapshot to reflect the current device state after
@@ -1327,7 +1649,9 @@ void RefreshSettingsFile()
     LoadCloseSettingsOnDisconnect(closeSettingsOnDisconnect);
     bool showDebugConsole = true;
     LoadShowDebugConsole(showDebugConsole);
-    bool ok = WriteSettingsXml(inputName, input2Name, outputName, routerEnabled, closeSettingsOnDisconnect, showDebugConsole);
+    bool checkForUpdateOnStart = true;
+    LoadCheckForUpdateOnStart(checkForUpdateOnStart);
+    bool ok = WriteSettingsXml(inputName, input2Name, outputName, output2Name, routerEnabled, closeSettingsOnDisconnect, showDebugConsole, checkForUpdateOnStart, devEnabled);
     printf("RefreshSettingsFile: WriteSettingsXml returned %s\n", ok ? "true" : "false");
 }
 
@@ -1338,7 +1662,8 @@ void ReloadStandbyOrgans()
 
     // Persist the refreshed cache to Settings.xml so that organs
     // removed from the Hauptwerk config are no longer kept on disk.
-    std::wstring inputName, input2Name, outputName;
+    std::wstring inputName, input2Name, outputName, output2Name;
+    DeviceEnabledStates devEnabled;
     std::wstring xml;
     if (TryReadSettingsXml(xml))
     {
@@ -1348,6 +1673,11 @@ void ReloadStandbyOrgans()
             TryGetTagStringValue(devicesSection, L"<MidiInputDevice01>", L"</MidiInputDevice01>", inputName);
             TryGetTagStringValue(devicesSection, L"<MidiInputDevice02>", L"</MidiInputDevice02>", input2Name);
             TryGetTagStringValue(devicesSection, L"<MidiOutputDevice01>", L"</MidiOutputDevice01>", outputName);
+            TryGetTagStringValue(devicesSection, L"<MidiOutputDevice02>", L"</MidiOutputDevice02>", output2Name);
+            TryGetTagEnabledAttribute(devicesSection, L"MidiInputDevice01", devEnabled.input1);
+            TryGetTagEnabledAttribute(devicesSection, L"MidiInputDevice02", devEnabled.input2);
+            TryGetTagEnabledAttribute(devicesSection, L"MidiOutputDevice01", devEnabled.output1);
+            TryGetTagEnabledAttribute(devicesSection, L"MidiOutputDevice02", devEnabled.output2);
         }
     }
     bool routerEnabled = false;
@@ -1356,12 +1686,167 @@ void ReloadStandbyOrgans()
     LoadCloseSettingsOnDisconnect(closeSettingsOnDisconnect);
     bool showDebugConsole = true;
     LoadShowDebugConsole(showDebugConsole);
-    WriteSettingsXml(inputName, input2Name, outputName, routerEnabled, closeSettingsOnDisconnect, showDebugConsole);
+    bool checkForUpdateOnStart = true;
+    LoadCheckForUpdateOnStart(checkForUpdateOnStart);
+    WriteSettingsXml(inputName, input2Name, outputName, output2Name, routerEnabled, closeSettingsOnDisconnect, showDebugConsole, checkForUpdateOnStart, devEnabled);
+}
+
+void ReloadInstalledOrgans()
+{
+    s_installedOrgansLoaded = false;
+    EnsureInstalledOrgansLoaded();
+
+    // Persist the refreshed cache to Settings.xml so that organs
+    // added or removed from OrganDefinitions are updated on disk.
+    std::wstring inputName, input2Name, outputName, output2Name;
+    DeviceEnabledStates devEnabled;
+    std::wstring xml;
+    if (TryReadSettingsXml(xml))
+    {
+        std::wstring midiSection, devicesSection;
+        if (TryGetSection(xml, L"Midi", midiSection) && TryGetSection(midiSection, L"SettingsDevices", devicesSection))
+        {
+            TryGetTagStringValue(devicesSection, L"<MidiInputDevice01>", L"</MidiInputDevice01>", inputName);
+            TryGetTagStringValue(devicesSection, L"<MidiInputDevice02>", L"</MidiInputDevice02>", input2Name);
+            TryGetTagStringValue(devicesSection, L"<MidiOutputDevice01>", L"</MidiOutputDevice01>", outputName);
+            TryGetTagStringValue(devicesSection, L"<MidiOutputDevice02>", L"</MidiOutputDevice02>", output2Name);
+            TryGetTagEnabledAttribute(devicesSection, L"MidiInputDevice01", devEnabled.input1);
+            TryGetTagEnabledAttribute(devicesSection, L"MidiInputDevice02", devEnabled.input2);
+            TryGetTagEnabledAttribute(devicesSection, L"MidiOutputDevice01", devEnabled.output1);
+            TryGetTagEnabledAttribute(devicesSection, L"MidiOutputDevice02", devEnabled.output2);
+        }
+    }
+    bool routerEnabled = false;
+    LoadMidiRouterEnabled(routerEnabled);
+    bool closeSettingsOnDisconnect = false;
+    LoadCloseSettingsOnDisconnect(closeSettingsOnDisconnect);
+    bool showDebugConsole = true;
+    LoadShowDebugConsole(showDebugConsole);
+    bool checkForUpdateOnStart = true;
+    LoadCheckForUpdateOnStart(checkForUpdateOnStart);
+    WriteSettingsXml(inputName, input2Name, outputName, output2Name, routerEnabled, closeSettingsOnDisconnect, showDebugConsole, checkForUpdateOnStart, devEnabled);
+
+    // Notify the Stream Deck plugin that the organ list has changed
+    NotifyStreamDeckOrganList();
+}
+
+// ---------------------------------------------------------------
+// OrganDefinitions folder watcher
+// ---------------------------------------------------------------
+namespace
+{
+    HANDLE g_organWatcherThread = nullptr;
+    HANDLE g_organWatcherStopEvent = nullptr;
+
+    DWORD WINAPI OrganFolderWatcherThread(LPVOID)
+    {
+        std::wstring organDir = s_rootHauptwerkSampleSets;
+        if (organDir.empty())
+        {
+            printf("[OrganWatcher] SampleSets path not configured, watcher exiting.\n");
+            return 0;
+        }
+        if (organDir.back() == L'\\' || organDir.back() == L'/')
+            organDir.pop_back();
+        organDir += L"\\OrganDefinitions";
+
+        DWORD attrs = GetFileAttributesW(organDir.c_str());
+        if (attrs == INVALID_FILE_ATTRIBUTES || !(attrs & FILE_ATTRIBUTE_DIRECTORY))
+        {
+            printf("[OrganWatcher] OrganDefinitions folder not found: %S\n", organDir.c_str());
+            return 0;
+        }
+
+        printf("[OrganWatcher] Watching: %S\n", organDir.c_str());
+
+        const DWORD kFilter = FILE_NOTIFY_CHANGE_FILE_NAME | FILE_NOTIFY_CHANGE_LAST_WRITE;
+
+        while (true)
+        {
+            // Create a fresh notification handle each iteration so the
+            // baseline is always up-to-date.  FindNextChangeNotification
+            // can silently stop working for LAST_WRITE on some systems.
+            HANDLE hChange = FindFirstChangeNotificationW(
+                organDir.c_str(), FALSE, kFilter);
+
+            if (hChange == INVALID_HANDLE_VALUE)
+            {
+                printf("[OrganWatcher] FindFirstChangeNotification failed (error %lu), retrying...\n", GetLastError());
+                if (WaitForSingleObject(g_organWatcherStopEvent, 3000) == WAIT_OBJECT_0)
+                    break;
+                continue;
+            }
+
+            HANDLE waitHandles[2] = { g_organWatcherStopEvent, hChange };
+            DWORD result = WaitForMultipleObjects(2, waitHandles, FALSE, INFINITE);
+            FindCloseChangeNotification(hChange);
+
+            if (result == WAIT_OBJECT_0)
+                break;
+
+            if (result == WAIT_OBJECT_0 + 1)
+            {
+                // Wait for file operations to settle before rescanning.
+                Sleep(1500);
+
+                // Don't reload while an organ is being loaded — Hauptwerk
+                // may touch files in OrganDefinitions during loading, which
+                // would trigger UpdateStreamDeckProfileTitles and kill SD.
+                if (g_isLoadingOrgan.load())
+                {
+                    printf("[OrganWatcher] Change detected but organ is loading, skipping reload.\n");
+                    continue;
+                }
+
+                printf("[OrganWatcher] Change detected in OrganDefinitions, reloading...\n");
+                ReloadInstalledOrgans();
+                printf("[OrganWatcher] InstalledOrgans refreshed.\n");
+            }
+            else
+            {
+                printf("[OrganWatcher] WaitForMultipleObjects returned %lu\n", result);
+                break;
+            }
+        }
+
+        printf("[OrganWatcher] Watcher stopped.\n");
+        return 0;
+    }
+}
+
+void StartOrganFolderWatcher()
+{
+    if (g_organWatcherThread)
+        return;
+
+    g_organWatcherStopEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    if (!g_organWatcherStopEvent)
+        return;
+
+    g_organWatcherThread = CreateThread(nullptr, 0, OrganFolderWatcherThread, nullptr, 0, nullptr);
+    if (!g_organWatcherThread)
+    {
+        CloseHandle(g_organWatcherStopEvent);
+        g_organWatcherStopEvent = nullptr;
+    }
+}
+
+void StopOrganFolderWatcher()
+{
+    if (!g_organWatcherThread)
+        return;
+
+    SetEvent(g_organWatcherStopEvent);
+    WaitForSingleObject(g_organWatcherThread, 3000);
+    CloseHandle(g_organWatcherThread);
+    CloseHandle(g_organWatcherStopEvent);
+    g_organWatcherThread = nullptr;
+    g_organWatcherStopEvent = nullptr;
 }
 
 std::vector<std::wstring> LoadStandbyOrganNames()
 {
-    std::vector<std::wstring> names(8);
+    std::vector<std::wstring> names(32);
     std::wstring xml;
     if (!TryReadSettingsXml(xml))
         return names;
@@ -1370,12 +1855,53 @@ std::vector<std::wstring> LoadStandbyOrganNames()
     if (!TryGetSection(xml, L"StandbyeOrgans", section))
         return names;
 
+    // Read Standby_Organ01 .. Standby_Organ08
     for (int i = 1; i <= 8; ++i)
     {
         std::wstring tag = L"Standby_Organ0" + std::to_wstring(i);
         std::wstring startTag = L"<" + tag + L">";
         std::wstring endTag = L"</" + tag + L">";
         TryGetTagStringValue(section, startTag, endTag, names[i - 1]);
+    }
+
+    // Read sborg09 .. sborg32
+    for (int i = 9; i <= 32; ++i)
+    {
+        std::wstring tag = std::wstring(L"sborg") + (i < 10 ? L"0" : L"") + std::to_wstring(i);
+        std::wstring startTag = L"<" + tag + L">";
+        std::wstring endTag = L"</" + tag + L">";
+        TryGetTagStringValue(section, startTag, endTag, names[i - 1]);
+    }
+
+    return names;
+}
+
+std::vector<std::wstring> LoadInstalledOrganNames()
+{
+    std::vector<std::wstring> names;
+    std::wstring xml;
+    if (!TryReadSettingsXml(xml))
+        return names;
+
+    std::wstring section;
+    if (!TryGetSection(xml, L"InstalledOrgans", section))
+        return names;
+
+    // Parse <Organ id="NN">name</Organ> entries.
+    size_t pos = 0;
+    while (true)
+    {
+        size_t start = section.find(L"<Organ", pos);
+        if (start == std::wstring::npos)
+            break;
+        size_t gt = section.find(L'>', start);
+        if (gt == std::wstring::npos)
+            break;
+        size_t end = section.find(L"</Organ>", gt + 1);
+        if (end == std::wstring::npos)
+            break;
+        names.push_back(section.substr(gt + 1, end - gt - 1));
+        pos = end + 8; // skip past "</Organ>"
     }
 
     return names;
@@ -1394,6 +1920,57 @@ bool LoadHauptwerkAppPath(std::wstring& path)
     return TryGetTagStringValue(optionsSection,
         L"<RootFolder_HauptwerkApplication>", L"</RootFolder_HauptwerkApplication>", path)
         && !path.empty();
+}
+
+bool SaveSelectedOutput2DeviceId(UINT deviceId)
+{
+    std::wstring inputName, input2Name, outputName;
+    DeviceEnabledStates devEnabled;
+    std::wstring xml;
+    if (TryReadSettingsXml(xml))
+    {
+        std::wstring midiSection, devicesSection;
+        if (TryGetSection(xml, L"Midi", midiSection) && TryGetSection(midiSection, L"SettingsDevices", devicesSection))
+        {
+            TryGetTagStringValue(devicesSection, L"<MidiInputDevice01>", L"</MidiInputDevice01>", inputName);
+            TryGetTagStringValue(devicesSection, L"<MidiInputDevice02>", L"</MidiInputDevice02>", input2Name);
+            TryGetTagStringValue(devicesSection, L"<MidiOutputDevice01>", L"</MidiOutputDevice01>", outputName);
+            TryGetTagEnabledAttribute(devicesSection, L"MidiInputDevice01", devEnabled.input1);
+            TryGetTagEnabledAttribute(devicesSection, L"MidiInputDevice02", devEnabled.input2);
+            TryGetTagEnabledAttribute(devicesSection, L"MidiOutputDevice01", devEnabled.output1);
+            TryGetTagEnabledAttribute(devicesSection, L"MidiOutputDevice02", devEnabled.output2);
+        }
+    }
+    bool routerEnabled = false;
+    LoadMidiRouterEnabled(routerEnabled);
+    bool closeSettingsOnDisconnect = false;
+    LoadCloseSettingsOnDisconnect(closeSettingsOnDisconnect);
+    bool showDebugConsole = true;
+    LoadShowDebugConsole(showDebugConsole);
+    bool checkForUpdateOnStart = true;
+    LoadCheckForUpdateOnStart(checkForUpdateOnStart);
+    return WriteSettingsXml(inputName, input2Name, outputName, GetMidiOutputDeviceName(deviceId), routerEnabled, closeSettingsOnDisconnect, showDebugConsole, checkForUpdateOnStart, devEnabled);
+}
+
+bool LoadSelectedOutput2DeviceId(UINT& deviceId)
+{
+    std::wstring xml;
+    if (!TryReadSettingsXml(xml))
+        return false;
+
+    std::wstring midiSection;
+    if (!TryGetSection(xml, L"Midi", midiSection))
+        return false;
+
+    std::wstring devicesSection;
+    if (!TryGetSection(midiSection, L"SettingsDevices", devicesSection))
+        return false;
+
+    std::wstring name;
+    if (!TryGetTagStringValue(devicesSection, L"<MidiOutputDevice02>", L"</MidiOutputDevice02>", name))
+        return false;
+
+    return FindMidiOutputDeviceIndex(name, deviceId);
 }
 
 bool InitHauptwerkPaths()
@@ -1426,6 +2003,11 @@ bool InitHauptwerkPaths()
                     TryGetTagStringValue(opts, L"<RootFolder_HauptwerkInternalWorkingFiles>", L"</RootFolder_HauptwerkInternalWorkingFiles>", s_rootHauptwerkWorkingFiles);
                 }
             }
+            // Invalidate cached organ data so it is re-read with the
+            // restored paths (they may have been cached as empty
+            // before InitHauptwerkPaths ran).
+            s_standbyOrgansLoaded = false;
+            s_installedOrgansLoaded = false;
             s_hauptwerkPathsLoaded = true;
             return true;
         }
@@ -1457,10 +2039,242 @@ bool InitHauptwerkPaths()
     s_rootHauptwerkApp = appPath;
     ReadHauptwerkFileLocations(appPath);
 
+    // Invalidate cached organ data so it is re-read with the
+    // now-configured paths (they may have been cached as empty
+    // before the paths were available).
+    s_standbyOrgansLoaded = false;
+    s_installedOrgansLoaded = false;
+
     // 4) Persist to Settings.xml by triggering a write.
     RefreshSettingsFile();
 
     s_hauptwerkPathsLoaded = true;
     printf("InitHauptwerkPaths: Configuration complete.\n");
+    return true;
+}
+
+bool LoadMidiInput1DeviceEnabled(bool& enabled)
+{
+    std::wstring xml;
+    if (!TryReadSettingsXml(xml))
+        return false;
+    std::wstring midiSection, devicesSection;
+    if (!TryGetSection(xml, L"Midi", midiSection) || !TryGetSection(midiSection, L"SettingsDevices", devicesSection))
+        return false;
+    return TryGetTagEnabledAttribute(devicesSection, L"MidiInputDevice01", enabled);
+}
+
+bool LoadMidiInput2DeviceEnabled(bool& enabled)
+{
+    std::wstring xml;
+    if (!TryReadSettingsXml(xml))
+        return false;
+    std::wstring midiSection, devicesSection;
+    if (!TryGetSection(xml, L"Midi", midiSection) || !TryGetSection(midiSection, L"SettingsDevices", devicesSection))
+        return false;
+    return TryGetTagEnabledAttribute(devicesSection, L"MidiInputDevice02", enabled);
+}
+
+bool LoadMidiOutput1DeviceEnabled(bool& enabled)
+{
+    std::wstring xml;
+    if (!TryReadSettingsXml(xml))
+        return false;
+    std::wstring midiSection, devicesSection;
+    if (!TryGetSection(xml, L"Midi", midiSection) || !TryGetSection(midiSection, L"SettingsDevices", devicesSection))
+        return false;
+    return TryGetTagEnabledAttribute(devicesSection, L"MidiOutputDevice01", enabled);
+}
+
+bool LoadMidiOutput2DeviceEnabled(bool& enabled)
+{
+    std::wstring xml;
+    if (!TryReadSettingsXml(xml))
+        return false;
+    std::wstring midiSection, devicesSection;
+    if (!TryGetSection(xml, L"Midi", midiSection) || !TryGetSection(midiSection, L"SettingsDevices", devicesSection))
+        return false;
+    return TryGetTagEnabledAttribute(devicesSection, L"MidiOutputDevice02", enabled);
+}
+
+bool SaveMidiInput1DeviceEnabled(bool enabled)
+{
+    std::wstring inputName, input2Name, outputName, output2Name;
+    DeviceEnabledStates devEnabled;
+    std::wstring xml;
+    if (TryReadSettingsXml(xml))
+    {
+        std::wstring midiSection, devicesSection;
+        if (TryGetSection(xml, L"Midi", midiSection) && TryGetSection(midiSection, L"SettingsDevices", devicesSection))
+        {
+            TryGetTagStringValue(devicesSection, L"<MidiInputDevice01>", L"</MidiInputDevice01>", inputName);
+            TryGetTagStringValue(devicesSection, L"<MidiInputDevice02>", L"</MidiInputDevice02>", input2Name);
+            TryGetTagStringValue(devicesSection, L"<MidiOutputDevice01>", L"</MidiOutputDevice01>", outputName);
+            TryGetTagStringValue(devicesSection, L"<MidiOutputDevice02>", L"</MidiOutputDevice02>", output2Name);
+            TryGetTagEnabledAttribute(devicesSection, L"MidiInputDevice01", devEnabled.input1);
+            TryGetTagEnabledAttribute(devicesSection, L"MidiInputDevice02", devEnabled.input2);
+            TryGetTagEnabledAttribute(devicesSection, L"MidiOutputDevice01", devEnabled.output1);
+            TryGetTagEnabledAttribute(devicesSection, L"MidiOutputDevice02", devEnabled.output2);
+        }
+    }
+    devEnabled.input1 = enabled;
+    bool routerEnabled = false;
+    LoadMidiRouterEnabled(routerEnabled);
+    bool closeSettingsOnDisconnect = false;
+    LoadCloseSettingsOnDisconnect(closeSettingsOnDisconnect);
+    bool showDebugConsole = true;
+    LoadShowDebugConsole(showDebugConsole);
+    bool checkForUpdateOnStart = true;
+    LoadCheckForUpdateOnStart(checkForUpdateOnStart);
+    return WriteSettingsXml(inputName, input2Name, outputName, output2Name, routerEnabled, closeSettingsOnDisconnect, showDebugConsole, checkForUpdateOnStart, devEnabled);
+}
+
+bool SaveMidiInput2DeviceEnabled(bool enabled)
+{
+    std::wstring inputName, input2Name, outputName, output2Name;
+    DeviceEnabledStates devEnabled;
+    std::wstring xml;
+    if (TryReadSettingsXml(xml))
+    {
+        std::wstring midiSection, devicesSection;
+        if (TryGetSection(xml, L"Midi", midiSection) && TryGetSection(midiSection, L"SettingsDevices", devicesSection))
+        {
+            TryGetTagStringValue(devicesSection, L"<MidiInputDevice01>", L"</MidiInputDevice01>", inputName);
+            TryGetTagStringValue(devicesSection, L"<MidiInputDevice02>", L"</MidiInputDevice02>", input2Name);
+            TryGetTagStringValue(devicesSection, L"<MidiOutputDevice01>", L"</MidiOutputDevice01>", outputName);
+            TryGetTagStringValue(devicesSection, L"<MidiOutputDevice02>", L"</MidiOutputDevice02>", output2Name);
+            TryGetTagEnabledAttribute(devicesSection, L"MidiInputDevice01", devEnabled.input1);
+            TryGetTagEnabledAttribute(devicesSection, L"MidiInputDevice02", devEnabled.input2);
+            TryGetTagEnabledAttribute(devicesSection, L"MidiOutputDevice01", devEnabled.output1);
+            TryGetTagEnabledAttribute(devicesSection, L"MidiOutputDevice02", devEnabled.output2);
+        }
+    }
+    devEnabled.input2 = enabled;
+    bool routerEnabled = false;
+    LoadMidiRouterEnabled(routerEnabled);
+    bool closeSettingsOnDisconnect = false;
+    LoadCloseSettingsOnDisconnect(closeSettingsOnDisconnect);
+    bool showDebugConsole = true;
+    LoadShowDebugConsole(showDebugConsole);
+    bool checkForUpdateOnStart = true;
+    LoadCheckForUpdateOnStart(checkForUpdateOnStart);
+    return WriteSettingsXml(inputName, input2Name, outputName, output2Name, routerEnabled, closeSettingsOnDisconnect, showDebugConsole, checkForUpdateOnStart, devEnabled);
+}
+
+bool SaveMidiOutput1DeviceEnabled(bool enabled)
+{
+    std::wstring inputName, input2Name, outputName, output2Name;
+    DeviceEnabledStates devEnabled;
+    std::wstring xml;
+    if (TryReadSettingsXml(xml))
+    {
+        std::wstring midiSection, devicesSection;
+        if (TryGetSection(xml, L"Midi", midiSection) && TryGetSection(midiSection, L"SettingsDevices", devicesSection))
+        {
+            TryGetTagStringValue(devicesSection, L"<MidiInputDevice01>", L"</MidiInputDevice01>", inputName);
+            TryGetTagStringValue(devicesSection, L"<MidiInputDevice02>", L"</MidiInputDevice02>", input2Name);
+            TryGetTagStringValue(devicesSection, L"<MidiOutputDevice01>", L"</MidiOutputDevice01>", outputName);
+            TryGetTagStringValue(devicesSection, L"<MidiOutputDevice02>", L"</MidiOutputDevice02>", output2Name);
+            TryGetTagEnabledAttribute(devicesSection, L"MidiInputDevice01", devEnabled.input1);
+            TryGetTagEnabledAttribute(devicesSection, L"MidiInputDevice02", devEnabled.input2);
+            TryGetTagEnabledAttribute(devicesSection, L"MidiOutputDevice01", devEnabled.output1);
+            TryGetTagEnabledAttribute(devicesSection, L"MidiOutputDevice02", devEnabled.output2);
+        }
+    }
+    devEnabled.output1 = enabled;
+    bool routerEnabled = false;
+    LoadMidiRouterEnabled(routerEnabled);
+    bool closeSettingsOnDisconnect = false;
+    LoadCloseSettingsOnDisconnect(closeSettingsOnDisconnect);
+    bool showDebugConsole = true;
+    LoadShowDebugConsole(showDebugConsole);
+    bool checkForUpdateOnStart = true;
+    LoadCheckForUpdateOnStart(checkForUpdateOnStart);
+    return WriteSettingsXml(inputName, input2Name, outputName, output2Name, routerEnabled, closeSettingsOnDisconnect, showDebugConsole, checkForUpdateOnStart, devEnabled);
+}
+
+bool SaveMidiOutput2DeviceEnabled(bool enabled)
+{
+    std::wstring inputName, input2Name, outputName, output2Name;
+    DeviceEnabledStates devEnabled;
+    std::wstring xml;
+    if (TryReadSettingsXml(xml))
+    {
+        std::wstring midiSection, devicesSection;
+        if (TryGetSection(xml, L"Midi", midiSection) && TryGetSection(midiSection, L"SettingsDevices", devicesSection))
+        {
+            TryGetTagStringValue(devicesSection, L"<MidiInputDevice01>", L"</MidiInputDevice01>", inputName);
+            TryGetTagStringValue(devicesSection, L"<MidiInputDevice02>", L"</MidiInputDevice02>", input2Name);
+            TryGetTagStringValue(devicesSection, L"<MidiOutputDevice01>", L"</MidiOutputDevice01>", outputName);
+            TryGetTagStringValue(devicesSection, L"<MidiOutputDevice02>", L"</MidiOutputDevice02>", output2Name);
+            TryGetTagEnabledAttribute(devicesSection, L"MidiInputDevice01", devEnabled.input1);
+            TryGetTagEnabledAttribute(devicesSection, L"MidiInputDevice02", devEnabled.input2);
+            TryGetTagEnabledAttribute(devicesSection, L"MidiOutputDevice01", devEnabled.output1);
+            TryGetTagEnabledAttribute(devicesSection, L"MidiOutputDevice02", devEnabled.output2);
+        }
+    }
+    devEnabled.output2 = enabled;
+    bool routerEnabled = false;
+    LoadMidiRouterEnabled(routerEnabled);
+    bool closeSettingsOnDisconnect = false;
+    LoadCloseSettingsOnDisconnect(closeSettingsOnDisconnect);
+    bool showDebugConsole = true;
+    LoadShowDebugConsole(showDebugConsole);
+    bool checkForUpdateOnStart = true;
+    LoadCheckForUpdateOnStart(checkForUpdateOnStart);
+    return WriteSettingsXml(inputName, input2Name, outputName, output2Name, routerEnabled, closeSettingsOnDisconnect, showDebugConsole, checkForUpdateOnStart, devEnabled);
+}
+
+bool SaveStreamDeckSettings(int ccNumber, const std::wstring& midiOut, const std::wstring& midiIn)
+{
+    s_cachedStreamDeckCC = std::to_wstring(ccNumber);
+    s_cachedStreamDeckMidiOut = midiOut;
+    s_cachedStreamDeckMidiIn = midiIn;
+    s_streamDeckSettingsLoaded = true;
+
+    std::wstring inputName, input2Name, outputName, output2Name;
+    DeviceEnabledStates devEnabled;
+    std::wstring xml;
+    if (TryReadSettingsXml(xml))
+    {
+        std::wstring midiSection, devicesSection;
+        if (TryGetSection(xml, L"Midi", midiSection) && TryGetSection(midiSection, L"SettingsDevices", devicesSection))
+        {
+            TryGetTagStringValue(devicesSection, L"<MidiInputDevice01>", L"</MidiInputDevice01>", inputName);
+            TryGetTagStringValue(devicesSection, L"<MidiInputDevice02>", L"</MidiInputDevice02>", input2Name);
+            TryGetTagStringValue(devicesSection, L"<MidiOutputDevice01>", L"</MidiOutputDevice01>", outputName);
+            TryGetTagStringValue(devicesSection, L"<MidiOutputDevice02>", L"</MidiOutputDevice02>", output2Name);
+            TryGetTagEnabledAttribute(devicesSection, L"MidiInputDevice01", devEnabled.input1);
+            TryGetTagEnabledAttribute(devicesSection, L"MidiInputDevice02", devEnabled.input2);
+            TryGetTagEnabledAttribute(devicesSection, L"MidiOutputDevice01", devEnabled.output1);
+            TryGetTagEnabledAttribute(devicesSection, L"MidiOutputDevice02", devEnabled.output2);
+        }
+    }
+    bool routerEnabled = false;
+    LoadMidiRouterEnabled(routerEnabled);
+    bool closeSettingsOnDisconnect = false;
+    LoadCloseSettingsOnDisconnect(closeSettingsOnDisconnect);
+    bool showDebugConsole = true;
+    LoadShowDebugConsole(showDebugConsole);
+    bool checkForUpdateOnStart = true;
+    LoadCheckForUpdateOnStart(checkForUpdateOnStart);
+    return WriteSettingsXml(inputName, input2Name, outputName, output2Name, routerEnabled, closeSettingsOnDisconnect, showDebugConsole, checkForUpdateOnStart, devEnabled);
+}
+
+bool LoadStreamDeckSettings(int& ccNumber, std::wstring& midiOut, std::wstring& midiIn)
+{
+    std::wstring xml;
+    if (!TryReadSettingsXml(xml))
+        return false;
+
+    std::wstring section;
+    if (!TryGetSection(xml, L"StreamDeck", section))
+        return false;
+
+    UINT cc = 81;
+    TryGetTagValue(section, L"<CC>", L"</CC>", cc);
+    ccNumber = static_cast<int>(cc);
+    TryGetTagStringValue(section, L"<MidiOut>", L"</MidiOut>", midiOut);
+    TryGetTagStringValue(section, L"<MidiIn>", L"</MidiIn>", midiIn);
     return true;
 }

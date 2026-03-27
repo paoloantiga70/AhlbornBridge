@@ -13,6 +13,8 @@
 
 // * Control Change 80 (load favorite organ)
 #define BF_0x50 0x50
+// * Control Change 81 (load installed organ by index)
+#define BF_0x51 0x51
 
 #include <windows.h>
 #include <mmsystem.h>
@@ -31,10 +33,17 @@ bool SwitchMidiInputDevice(UINT deviceId);
 bool SwitchMidiInput2Device(UINT deviceId);
 bool RefreshMidiInputDevice();
 bool SwitchMidiOutputDevice(UINT deviceId);
+bool SwitchMidiOutput2Device(UINT deviceId);
+void CloseMidiInputDeviceOnly();
+void CloseMidiInput2DeviceOnly();
+void CloseMidiOutputDeviceOnly();
+void CloseMidiOutput2DeviceOnly();
 bool IsMidiInputDeviceOpen();
 bool IsMidiInput2DeviceOpen();
 bool IsMidiOutputDeviceOpen();
+bool IsMidiOutput2DeviceOpen();
 void RefreshMidiDeviceStatus();
+void CleanupMidiLocks();
 void CALLBACK MidiInProc(
     HMIDIIN hMidiIn,
     UINT wMsg,
@@ -56,6 +65,10 @@ bool EnqueueMidiOutMessage(DWORD msg);
 void TriggerTrayIconStartupFlash();
 // Stop the tray icon flashing animation.
 void StopTrayIconFlashing();
+// Enqueue a deferred command to load an installed organ by 1-based index.
+void EnqueueLoadInstalledOrgan(int index);
+// Enqueue a deferred command to unload the current organ.
+void EnqueueUnloadOrgan();
 enum class FeStatus
 {
     None,
@@ -75,13 +88,17 @@ constexpr std::chrono::milliseconds disconnectConfirm(1500);
 extern HMIDIIN hMidiIn;
 extern HMIDIIN hMidiIn2;
 extern HMIDIOUT hMidiOut;
+extern HMIDIOUT hMidiOut2;
 extern HANDLE hThread;
 extern std::atomic<bool> g_midiRouterEnabled;
 extern bool is_organ_loaded;
 extern std::atomic<bool> g_inputDeviceOpen;
 extern std::atomic<bool> g_input2DeviceOpen;
 extern std::atomic<bool> g_outputDeviceOpen;
+extern std::atomic<bool> g_output2DeviceOpen;
 extern std::atomic<bool> g_isLoadingOrgan;
+extern std::atomic<int> g_currentLoadedFavoriteIndex;
+extern std::atomic<int> g_currentLoadedInstalledOrganIndex;
 
 using Clock = std::chrono::steady_clock;
 using TimePoint = std::chrono::time_point<Clock>;

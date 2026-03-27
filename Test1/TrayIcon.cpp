@@ -3,6 +3,9 @@
 #include "Xml.h"
 #include "Hauptwerk.h"
 #include "AutoUpdate.h"
+#include "StreamDeck.h"
+#include "StreamDeck_profiler.h"
+#include "Version.h"
 
 #include <shellapi.h>
 #include <gdiplus.h>
@@ -27,12 +30,15 @@ static HWND g_settingsMidiPageHwnd = nullptr;
 static HWND g_settingsInfoPageHwnd = nullptr;
 static HWND g_settingsOrganInfoPageHwnd = nullptr;
 static HWND g_settingsOrganInfoGroupHwnd = nullptr;
+static HWND g_settingsAboutPageHwnd = nullptr;
+static HWND g_settingsStreamDeckPageHwnd = nullptr;
 static HWND g_inputLedStripHwnd = nullptr;
 static HWND g_outputLedStripHwnd = nullptr;
 static HWND g_feLedHwnd = nullptr;
 static HWND g_inputStatusLedHwnd = nullptr;
 static HWND g_inputStatus2LedHwnd = nullptr;
 static HWND g_outputStatusLedHwnd = nullptr;
+static HWND g_outputStatus2LedHwnd = nullptr;
 static std::atomic<bool> g_closeSettingsOnDisconnect{ false };
 
 constexpr UINT kLedTimerId = 1;
@@ -41,6 +47,9 @@ constexpr DWORD kInputRefreshBlinkIntervalMs = 150;
 constexpr DWORD kInputRefreshDurationMs = 1200;
 constexpr int kAutoCloseCheckId = 201;
 constexpr int kShowConsoleCheckId = 202;
+constexpr int kCheckForUpdateOnStartCheckId = 203;
+constexpr int kSdSendButtonId = 304;
+constexpr int kSdPluginUpdateButtonId = 305;
 
 namespace
 {
@@ -48,6 +57,11 @@ namespace
     void UpdateOrganInfoGroupTitle();
 
     DWORD g_inputRefreshUntil = 0;
+
+    bool g_inputDeviceError   = false;
+    bool g_input2DeviceError  = false;
+    bool g_outputDeviceError  = false;
+    bool g_output2DeviceError = false;
 
     bool EnsureGdiplusStarted()
     {
@@ -83,12 +97,109 @@ namespace
             case WM_LBUTTONUP:
             {
                 LONG_PTR controlId = GetWindowLongPtrW(hWnd, GWLP_ID);
-                if (controlId == 107)
+                HWND parent = GetParent(hWnd);
+                if (controlId == 107) // Input 01
                 {
-                    g_inputRefreshUntil = GetTickCount() + kInputRefreshDurationMs;
-                    RefreshMidiInputDevice();
-                    HandleMidiDeviceChange(GetParent(hWnd));
+                    if (IsMidiInputDeviceOpen())
+                    {
+                        CloseMidiInputDeviceOnly();
+                        g_inputDeviceError = false;
+                    }
+                    else
+                    {
+                        g_inputRefreshUntil = GetTickCount() + kInputRefreshDurationMs;
+                        UINT deviceId = 0;
+                        LoadSelectedDeviceId(deviceId);
+                        bool ok = SwitchMidiInputDevice(deviceId);
+                        g_inputDeviceError = !ok;
+                    }
+                    HandleMidiDeviceChange(parent);
+                    {
+                        bool nowOpen = IsMidiInputDeviceOpen();
+                        SaveMidiInput1DeviceEnabled(nowOpen);
+                        if (g_settingsMidiPageHwnd)
+                            EnableWindow(GetDlgItem(g_settingsMidiPageHwnd, 101), nowOpen ? TRUE : FALSE);
+                    }
                     return 0;
+                }
+                if (controlId == 110) // Input 02
+                {
+                    if (IsMidiInput2DeviceOpen())
+                    {
+                        CloseMidiInput2DeviceOnly();
+                        g_input2DeviceError = false;
+                    }
+                    else
+                    {
+                        UINT deviceId = 0;
+                        LoadSelectedInput2DeviceId(deviceId);
+                        bool ok = SwitchMidiInput2Device(deviceId);
+                        g_input2DeviceError = !ok;
+                    }
+                    HandleMidiDeviceChange(parent);
+                    {
+                        bool nowOpen = IsMidiInput2DeviceOpen();
+                        SaveMidiInput2DeviceEnabled(nowOpen);
+                        if (g_settingsMidiPageHwnd)
+                            EnableWindow(GetDlgItem(g_settingsMidiPageHwnd, 109), nowOpen ? TRUE : FALSE);
+                    }
+                    return 0;
+                }
+                if (controlId == 108) // Output 01
+                {
+                    if (IsMidiOutputDeviceOpen())
+                    {
+                        CloseMidiOutputDeviceOnly();
+                        g_outputDeviceError = false;
+                    }
+                    else
+                    {
+                        UINT deviceId = 0;
+                        LoadSelectedOutputDeviceId(deviceId);
+                        bool ok = SwitchMidiOutputDevice(deviceId);
+                        g_outputDeviceError = !ok;
+                    }
+                    HandleMidiDeviceChange(parent);
+                    {
+                        bool nowOpen = IsMidiOutputDeviceOpen();
+                        SaveMidiOutput1DeviceEnabled(nowOpen);
+                        if (g_settingsMidiPageHwnd)
+                            EnableWindow(GetDlgItem(g_settingsMidiPageHwnd, 102), nowOpen ? TRUE : FALSE);
+                    }
+                    return 0;
+                }
+                if (controlId == 112) // Output 02
+                {
+                    if (IsMidiOutput2DeviceOpen())
+                    {
+                        CloseMidiOutput2DeviceOnly();
+                        g_output2DeviceError = false;
+                    }
+                    else
+                    {
+                        UINT deviceId = 0;
+                        LoadSelectedOutput2DeviceId(deviceId);
+                        bool ok = SwitchMidiOutput2Device(deviceId);
+                        g_output2DeviceError = !ok;
+                    }
+                    HandleMidiDeviceChange(parent);
+                    {
+                        bool nowOpen = IsMidiOutput2DeviceOpen();
+                        SaveMidiOutput2DeviceEnabled(nowOpen);
+                        if (g_settingsMidiPageHwnd)
+                            EnableWindow(GetDlgItem(g_settingsMidiPageHwnd, 111), nowOpen ? TRUE : FALSE);
+                    }
+                    return 0;
+                }
+                break;
+            }
+            case WM_SETCURSOR:
+            {
+                LONG_PTR controlId = GetWindowLongPtrW(hWnd, GWLP_ID);
+                if (controlId == 107 || controlId == 108 || controlId == 110 || controlId == 112)
+                {
+                    SetCursor(LoadCursorW(nullptr, IDC_HAND));
+                    return TRUE;
                 }
                 break;
             }
@@ -115,14 +226,22 @@ namespace
                 bool isInputStatus = controlId == 107;
                 bool isOutputStatus = controlId == 108;
                 bool isInput2Status = controlId == 110;
+                bool isOutput2Status = controlId == 112;
 
-                if (isInputStatus || isOutputStatus || isInput2Status)
+                if (isInputStatus || isOutputStatus || isInput2Status || isOutput2Status)
                 {
                     RECT ledRect{ margin, y, margin + ledSize, y + ledSize };
                     bool isOpen = isInputStatus ? IsMidiInputDeviceOpen()
                                 : isInput2Status ? IsMidiInput2DeviceOpen()
+                                : isOutput2Status ? IsMidiOutput2DeviceOpen()
                                 : IsMidiOutputDeviceOpen();
-                    COLORREF color = isOpen ? RGB(0, 200, 0) : RGB(220, 0, 0);
+                    bool hasError = isInputStatus   ? g_inputDeviceError
+                                  : isInput2Status  ? g_input2DeviceError
+                                  : isOutput2Status ? g_output2DeviceError
+                                  : g_outputDeviceError;
+                    COLORREF color = isOpen    ? RGB(0, 200, 0)   // verde  = aperto
+                                   : hasError  ? RGB(220, 0, 0)   // rosso  = errore
+                                   : RGB(80, 80, 80);             // grigio = chiuso
                     if (isInputStatus && g_inputRefreshUntil != 0)
                     {
                         DWORD tick = GetTickCount();
@@ -299,6 +418,24 @@ namespace
                 SendMessageW(hOutputCombo, CB_SETCURSEL, static_cast<WPARAM>(currentSel), 0);
             }
         }
+
+        HWND hOutput2Combo = GetDlgItem(owner, 111);
+        if (hOutput2Combo)
+        {
+            int currentSel = static_cast<int>(SendMessageW(hOutput2Combo, CB_GETCURSEL, 0, 0));
+            PopulateMidiOutputs(hOutput2Combo);
+            UINT savedOutput2DeviceId = 0;
+            int output2Count = static_cast<int>(SendMessageW(hOutput2Combo, CB_GETCOUNT, 0, 0));
+            if (output2Count > 0 && LoadSelectedOutput2DeviceId(savedOutput2DeviceId)
+                && savedOutput2DeviceId < static_cast<UINT>(output2Count))
+            {
+                SendMessageW(hOutput2Combo, CB_SETCURSEL, static_cast<WPARAM>(savedOutput2DeviceId), 0);
+            }
+            else if (currentSel >= 0 && currentSel < output2Count)
+            {
+                SendMessageW(hOutput2Combo, CB_SETCURSEL, static_cast<WPARAM>(currentSel), 0);
+            }
+        }
     }
 
     void HandleMidiDeviceChange(HWND hWnd)
@@ -318,6 +455,10 @@ namespace
         if (g_outputStatusLedHwnd)
         {
             InvalidateRect(g_outputStatusLedHwnd, nullptr, FALSE);
+        }
+        if (g_outputStatus2LedHwnd)
+        {
+            InvalidateRect(g_outputStatus2LedHwnd, nullptr, FALSE);
         }
     }
 
@@ -417,6 +558,10 @@ LRESULT CALLBACK SettingsWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM 
         TabCtrl_InsertItem(g_settingsTabHwnd, 1, &tabItem);
         tabItem.pszText = const_cast<wchar_t*>(L"Organ Info...");
         TabCtrl_InsertItem(g_settingsTabHwnd, 2, &tabItem);
+        tabItem.pszText = const_cast<wchar_t*>(L"Stream Deck");
+        TabCtrl_InsertItem(g_settingsTabHwnd, 3, &tabItem);
+        tabItem.pszText = const_cast<wchar_t*>(L"About");
+        TabCtrl_InsertItem(g_settingsTabHwnd, 4, &tabItem);
 
         RECT tabRect = {};
         GetClientRect(g_settingsTabHwnd, &tabRect);
@@ -437,6 +582,61 @@ LRESULT CALLBACK SettingsWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM 
             tabRect.left, tabRect.top,
             tabRect.right - tabRect.left, tabRect.bottom - tabRect.top,
             hWnd, nullptr, nullptr, nullptr);
+
+        g_settingsAboutPageHwnd = CreateWindowW(kSettingsPageClassName, nullptr, WS_CHILD,
+            tabRect.left, tabRect.top,
+            tabRect.right - tabRect.left, tabRect.bottom - tabRect.top,
+            hWnd, nullptr, nullptr, nullptr);
+
+        g_settingsStreamDeckPageHwnd = CreateWindowW(kSettingsPageClassName, nullptr, WS_CHILD,
+            tabRect.left, tabRect.top,
+            tabRect.right - tabRect.left, tabRect.bottom - tabRect.top,
+            hWnd, nullptr, nullptr, nullptr);
+
+        // --- Stream Deck page controls ---
+        {
+            CreateWindowW(L"BUTTON", L"Stream Deck Profile", WS_CHILD | WS_VISIBLE | BS_GROUPBOX,
+                10, 8, 300, 100, g_settingsStreamDeckPageHwnd, nullptr, nullptr, nullptr);
+
+            CreateWindowW(L"STATIC",
+                L"Create a Stream Deck profile with one\n"
+                L"button for each installed organ.",
+                WS_CHILD | WS_VISIBLE,
+                22, 32, 270, 36, g_settingsStreamDeckPageHwnd, nullptr, nullptr, nullptr);
+
+            CreateWindowW(L"BUTTON", L"Create Profile",
+                WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+                22, 76, 120, 24, g_settingsStreamDeckPageHwnd, (HMENU)kSdSendButtonId, nullptr, nullptr);
+
+            CreateWindowW(L"BUTTON", L"Plugin Update", WS_CHILD | WS_VISIBLE | BS_GROUPBOX,
+                10, 116, 300, 80, g_settingsStreamDeckPageHwnd, nullptr, nullptr, nullptr);
+
+            CreateWindowW(L"STATIC",
+                L"Check GitHub for a newer version of the\n"
+                L"AhlbornBridge Stream Deck plugin.",
+                WS_CHILD | WS_VISIBLE,
+                22, 140, 270, 36, g_settingsStreamDeckPageHwnd, nullptr, nullptr, nullptr);
+
+            CreateWindowW(L"BUTTON", L"Check for Update",
+                WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+                22, 176, 140, 24, g_settingsStreamDeckPageHwnd, (HMENU)kSdPluginUpdateButtonId, nullptr, nullptr);
+        }
+
+        {
+            CreateWindowW(L"BUTTON", L"About AhlbornBridge", WS_CHILD | WS_VISIBLE | BS_GROUPBOX,
+                10, 8, 300, 120, g_settingsAboutPageHwnd, nullptr, nullptr, nullptr);
+
+            wchar_t versionBuf[128] = {};
+            wsprintfW(versionBuf, L"Version: %hs", APP_VERSION);
+            CreateWindowW(L"STATIC", versionBuf, WS_CHILD | WS_VISIBLE,
+                22, 32, 270, 20, g_settingsAboutPageHwnd, nullptr, nullptr, nullptr);
+
+            CreateWindowW(L"STATIC", L"\x00A9 2025 paoloantiga70", WS_CHILD | WS_VISIBLE,
+                22, 56, 270, 20, g_settingsAboutPageHwnd, nullptr, nullptr, nullptr);
+
+            CreateWindowW(L"STATIC", L"github.com/paoloantiga70/AhlbornBridge", WS_CHILD | WS_VISIBLE,
+                22, 80, 270, 20, g_settingsAboutPageHwnd, nullptr, nullptr, nullptr);
+        }
 
         RECT organRect = {};
         GetClientRect(g_settingsOrganInfoPageHwnd, &organRect);
@@ -479,6 +679,18 @@ LRESULT CALLBACK SettingsWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM 
             SendMessageW(hShowConsoleCheck, BM_SETCHECK, BST_UNCHECKED, 0);
         }
 
+        CreateWindowW(L"BUTTON", L"Updates", WS_CHILD | WS_VISIBLE | BS_GROUPBOX,
+            10, 144, 300, 50, g_settingsInfoPageHwnd, nullptr, nullptr, nullptr);
+
+        HWND hCheckForUpdateOnStartCheck = CreateWindowW(L"BUTTON",
+            L"Check for updates on start",
+            WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
+            22, 166, 280, 20, g_settingsInfoPageHwnd, (HMENU)kCheckForUpdateOnStartCheckId, nullptr, nullptr);
+
+        bool checkForUpdateOnStart = true;
+        LoadCheckForUpdateOnStart(checkForUpdateOnStart);
+        SendMessageW(hCheckForUpdateOnStartCheck, BM_SETCHECK, checkForUpdateOnStart ? BST_CHECKED : BST_UNCHECKED, 0);
+
         CreateWindowW(L"BUTTON", L"MIDI Input devices...", WS_CHILD | WS_VISIBLE | BS_GROUPBOX,
             10, 8, 280, 120, g_settingsMidiPageHwnd, nullptr, nullptr, nullptr);
 
@@ -499,6 +711,11 @@ LRESULT CALLBACK SettingsWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM 
         {
             SendMessageW(hCombo, CB_SETCURSEL, static_cast<WPARAM>(savedDeviceId), 0);
         }
+        {
+            bool input1Enabled = true;
+            LoadMidiInput1DeviceEnabled(input1Enabled);
+            EnableWindow(hCombo, input1Enabled ? TRUE : FALSE);
+        }
 
         CreateWindowW(L"STATIC", L"Device 02", WS_CHILD | WS_VISIBLE,
             22, 80, 80, 16, g_settingsMidiPageHwnd, nullptr, nullptr, nullptr);
@@ -517,9 +734,14 @@ LRESULT CALLBACK SettingsWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM 
         {
             SendMessageW(hCombo2, CB_SETCURSEL, static_cast<WPARAM>(savedDeviceId2), 0);
         }
+        {
+            bool input2Enabled = true;
+            LoadMidiInput2DeviceEnabled(input2Enabled);
+            EnableWindow(hCombo2, input2Enabled ? TRUE : FALSE);
+        }
 
         CreateWindowW(L"BUTTON", L"MIDI Output devices...", WS_CHILD | WS_VISIBLE | BS_GROUPBOX,
-            10, 141, 280, 70, g_settingsMidiPageHwnd, nullptr, nullptr, nullptr);
+            10, 141, 280, 120, g_settingsMidiPageHwnd, nullptr, nullptr, nullptr);
 
         CreateWindowW(L"STATIC", L"Device 01", WS_CHILD | WS_VISIBLE,
             22, 163, 80, 16, g_settingsMidiPageHwnd, nullptr, nullptr, nullptr);
@@ -539,12 +761,41 @@ LRESULT CALLBACK SettingsWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM 
         {
             SendMessageW(hOutputCombo, CB_SETCURSEL, static_cast<WPARAM>(savedOutputDeviceId), 0);
         }
+        {
+            bool output1Enabled = true;
+            LoadMidiOutput1DeviceEnabled(output1Enabled);
+            EnableWindow(hOutputCombo, output1Enabled ? TRUE : FALSE);
+        }
+
+        CreateWindowW(L"STATIC", L"Device 02", WS_CHILD | WS_VISIBLE,
+            22, 213, 80, 16, g_settingsMidiPageHwnd, nullptr, nullptr, nullptr);
+
+        HWND hOutput2Combo = CreateWindowW(L"COMBOBOX", nullptr,
+            WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | WS_VSCROLL,
+            22, 231, 232, 200, g_settingsMidiPageHwnd, (HMENU)111, nullptr, nullptr);
+
+        g_outputStatus2LedHwnd = CreateWindowW(kLedStripClassName, nullptr, WS_CHILD | WS_VISIBLE,
+            260, 233, 16, 16, g_settingsMidiPageHwnd, (HMENU)112, nullptr, nullptr);
+
+        PopulateMidiOutputs(hOutput2Combo);
+        UINT savedOutput2DeviceId = 0;
+        int output2Count = static_cast<int>(SendMessageW(hOutput2Combo, CB_GETCOUNT, 0, 0));
+        if (output2Count > 0 && LoadSelectedOutput2DeviceId(savedOutput2DeviceId)
+            && savedOutput2DeviceId < static_cast<UINT>(output2Count))
+        {
+            SendMessageW(hOutput2Combo, CB_SETCURSEL, static_cast<WPARAM>(savedOutput2DeviceId), 0);
+        }
+        {
+            bool output2Enabled = true;
+            LoadMidiOutput2DeviceEnabled(output2Enabled);
+            EnableWindow(hOutput2Combo, output2Enabled ? TRUE : FALSE);
+        }
 
         CreateWindowW(L"BUTTON", L"Router", WS_CHILD | WS_VISIBLE | BS_GROUPBOX,
-            10, 219, 280, 50, g_settingsMidiPageHwnd, nullptr, nullptr, nullptr);
+            10, 269, 280, 50, g_settingsMidiPageHwnd, nullptr, nullptr, nullptr);
 
         HWND hRouterCheck = CreateWindowW(L"BUTTON", L"Enable MIDI routing", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
-            22, 239, 240, 20, g_settingsMidiPageHwnd, (HMENU)103, nullptr, nullptr);
+            22, 289, 240, 20, g_settingsMidiPageHwnd, (HMENU)103, nullptr, nullptr);
 
         bool routerEnabled = false;
         if (LoadMidiRouterEnabled(routerEnabled) && routerEnabled)
@@ -554,25 +805,25 @@ LRESULT CALLBACK SettingsWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM 
         g_midiRouterEnabled = routerEnabled;
 
         CreateWindowW(L"BUTTON", L"Ahlborn 250 SL (PORT)", WS_CHILD | WS_VISIBLE | BS_GROUPBOX,
-            10, 277, 280, 60, g_settingsMidiPageHwnd, nullptr, nullptr, nullptr);
+            10, 327, 280, 60, g_settingsMidiPageHwnd, nullptr, nullptr, nullptr);
 
         g_inputLedStripHwnd = CreateWindowW(kLedStripClassName, nullptr, WS_CHILD | WS_VISIBLE,
-            22, 299, 256, 20, g_settingsMidiPageHwnd, (HMENU)104, nullptr, nullptr);
+            22, 349, 256, 20, g_settingsMidiPageHwnd, (HMENU)104, nullptr, nullptr);
 
         CreateWindowW(L"BUTTON", L"Hauptwerk midi input (PORT)", WS_CHILD | WS_VISIBLE | BS_GROUPBOX,
-            10, 343, 280, 60, g_settingsMidiPageHwnd, nullptr, nullptr, nullptr);
+            10, 393, 280, 60, g_settingsMidiPageHwnd, nullptr, nullptr, nullptr);
 
         g_outputLedStripHwnd = CreateWindowW(kLedStripClassName, nullptr, WS_CHILD | WS_VISIBLE,
-            22, 365, 256, 20, g_settingsMidiPageHwnd, (HMENU)105, nullptr, nullptr, reinterpret_cast<LPVOID>(1));
+            22, 415, 256, 20, g_settingsMidiPageHwnd, (HMENU)105, nullptr, nullptr, reinterpret_cast<LPVOID>(1));
 
         CreateWindowW(L"BUTTON", L"FE (Active sensing)", WS_CHILD | WS_VISIBLE | BS_GROUPBOX,
-            10, 409, 280, 50, g_settingsMidiPageHwnd, nullptr, nullptr, nullptr);
+            10, 459, 280, 50, g_settingsMidiPageHwnd, nullptr, nullptr, nullptr);
 
         g_feLedHwnd = CreateWindowW(kLedStripClassName, nullptr, WS_CHILD | WS_VISIBLE,
-            22, 429, 20, 20, g_settingsMidiPageHwnd, (HMENU)106, nullptr, nullptr);
+            22, 479, 20, 20, g_settingsMidiPageHwnd, (HMENU)106, nullptr, nullptr);
 
         CreateWindowW(L"STATIC", L"FE", WS_CHILD | WS_VISIBLE,
-            48, 431, 120, 16, g_settingsMidiPageHwnd, nullptr, nullptr, nullptr);
+            48, 481, 120, 16, g_settingsMidiPageHwnd, nullptr, nullptr, nullptr);
 
         SetTimer(hWnd, kLedTimerId, kLedTimerIntervalMs, nullptr);
         return 0;
@@ -654,6 +905,31 @@ LRESULT CALLBACK SettingsWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM 
             }
             return 0;
         }
+        if (HIWORD(wParam) == CBN_SELCHANGE && LOWORD(wParam) == 111)
+        {
+            HWND hCombo = reinterpret_cast<HWND>(lParam);
+            if (!hCombo)
+            {
+                hCombo = GetDlgItem(g_settingsMidiPageHwnd ? g_settingsMidiPageHwnd : hWnd, 111);
+            }
+
+            int selectedIndex = static_cast<int>(SendMessageW(hCombo, CB_GETCURSEL, 0, 0));
+            if (selectedIndex >= 0)
+            {
+                UINT numDevs = midiOutGetNumDevs();
+                if (static_cast<UINT>(selectedIndex) < numDevs)
+                {
+                    UINT deviceId = static_cast<UINT>(selectedIndex);
+                    SaveSelectedOutput2DeviceId(deviceId);
+                    SwitchMidiOutput2Device(deviceId);
+                    if (g_outputStatus2LedHwnd)
+                    {
+                        InvalidateRect(g_outputStatus2LedHwnd, nullptr, FALSE);
+                    }
+                }
+            }
+            return 0;
+        }
         if (HIWORD(wParam) == BN_CLICKED && LOWORD(wParam) == 103)
         {
             HWND hCheck = reinterpret_cast<HWND>(lParam);
@@ -701,6 +977,31 @@ LRESULT CALLBACK SettingsWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM 
             SaveShowDebugConsole(show);
             return 0;
         }
+        if (HIWORD(wParam) == BN_CLICKED && LOWORD(wParam) == kCheckForUpdateOnStartCheckId)
+        {
+            HWND hCheck = reinterpret_cast<HWND>(lParam);
+            if (!hCheck)
+            {
+                hCheck = GetDlgItem(g_settingsInfoPageHwnd ? g_settingsInfoPageHwnd : hWnd, kCheckForUpdateOnStartCheckId);
+            }
+
+            bool enabled = SendMessageW(hCheck, BM_GETCHECK, 0, 0) == BST_CHECKED;
+            SaveCheckForUpdateOnStart(enabled);
+            return 0;
+        }
+        if (HIWORD(wParam) == BN_CLICKED && LOWORD(wParam) == kSdSendButtonId)
+        {
+            if (CreateStreamDeckProfileFromSettings())
+                MessageBoxW(hWnd, L"Stream Deck profile created successfully!", L"Stream Deck", MB_OK | MB_ICONINFORMATION);
+            else
+                MessageBoxW(hWnd, L"Failed to create Stream Deck profile.\nCheck that organs are installed.", L"Stream Deck", MB_OK | MB_ICONERROR);
+            return 0;
+        }
+        if (HIWORD(wParam) == BN_CLICKED && LOWORD(wParam) == kSdPluginUpdateButtonId)
+        {
+            CheckForPluginUpdateInteractive(hWnd);
+            return 0;
+        }
         break;
     }
     case WM_DEVICECHANGE:
@@ -725,6 +1026,14 @@ LRESULT CALLBACK SettingsWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM 
             if (g_settingsOrganInfoPageHwnd)
             {
                 ShowWindow(g_settingsOrganInfoPageHwnd, sel == 2 ? SW_SHOW : SW_HIDE);
+            }
+            if (g_settingsStreamDeckPageHwnd)
+            {
+                ShowWindow(g_settingsStreamDeckPageHwnd, sel == 3 ? SW_SHOW : SW_HIDE);
+            }
+            if (g_settingsAboutPageHwnd)
+            {
+                ShowWindow(g_settingsAboutPageHwnd, sel == 4 ? SW_SHOW : SW_HIDE);
             }
             if (sel == 2)
             {
@@ -760,6 +1069,10 @@ LRESULT CALLBACK SettingsWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM 
             {
                 InvalidateRect(g_outputStatusLedHwnd, nullptr, FALSE);
             }
+            if (g_outputStatus2LedHwnd)
+            {
+                InvalidateRect(g_outputStatus2LedHwnd, nullptr, FALSE);
+            }
             UpdateOrganInfoGroupTitle();
         }
         return 0;
@@ -774,11 +1087,14 @@ LRESULT CALLBACK SettingsWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM 
         g_inputStatusLedHwnd = nullptr;
         g_inputStatus2LedHwnd = nullptr;
         g_outputStatusLedHwnd = nullptr;
+        g_outputStatus2LedHwnd = nullptr;
         g_settingsTabHwnd = nullptr;
         g_settingsMidiPageHwnd = nullptr;
         g_settingsInfoPageHwnd = nullptr;
         g_settingsOrganInfoPageHwnd = nullptr;
         g_settingsOrganInfoGroupHwnd = nullptr;
+        g_settingsAboutPageHwnd = nullptr;
+        g_settingsStreamDeckPageHwnd = nullptr;
         g_settingsHwnd = nullptr;
         return 0;
     default:
@@ -1045,6 +1361,8 @@ LRESULT CALLBACK TrayIconWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM 
 		// Gracefully stop background MIDI processing and close Hauptwerk
 		// before exiting.
 		running = false;
+		StopOrganFolderWatcher();
+		StopStreamDeckPipeServer();
 		if (hMidiIn)
 		{
 			midiInStop(hMidiIn);
@@ -1053,6 +1371,7 @@ LRESULT CALLBACK TrayIconWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM 
 		}
 		CloseHauptwerkProcess();
 		RemoveTrayIcon(hWnd);
+		CleanupMidiLocks();
 		PostQuitMessage(0);
 		return 0;
 
@@ -1090,7 +1409,7 @@ void ShowSettingsWindow(HINSTANCE hInstance, HWND hOwner)
         kSettingsClassName,
         L"Settings",
         WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU,
-        CW_USEDEFAULT, CW_USEDEFAULT, 360, 551,
+        CW_USEDEFAULT, CW_USEDEFAULT, 460, 601,
         hOwner,
         nullptr,
         hInstance,

@@ -1,5 +1,6 @@
 #include "AutoUpdate.h"
 #include "Version.h"
+#include "../StreamDeckPlugin/PluginVersion.h"
 
 #include <winhttp.h>
 #include <cstdio>
@@ -53,6 +54,12 @@ static bool HttpsGet(const wchar_t* host, const wchar_t* path,
         WinHttpCloseHandle(hSession);
         return false;
     }
+
+    // Limit wait time so a missing/slow network does not block the caller.
+    DWORD timeout = 5000; // 5 seconds
+    WinHttpSetOption(hRequest, WINHTTP_OPTION_CONNECT_TIMEOUT, &timeout, sizeof(timeout));
+    WinHttpSetOption(hRequest, WINHTTP_OPTION_SEND_TIMEOUT,    &timeout, sizeof(timeout));
+    WinHttpSetOption(hRequest, WINHTTP_OPTION_RECEIVE_TIMEOUT, &timeout, sizeof(timeout));
 
     if (!WinHttpSendRequest(hRequest, WINHTTP_NO_ADDITIONAL_HEADERS, 0,
                             WINHTTP_NO_REQUEST_DATA, 0, 0, 0) ||
@@ -270,13 +277,14 @@ static bool JsonExtractInstallerUrl(const std::string& json,
 // Public API
 // ---------------------------------------------------------------------------
 
-bool CheckForUpdate(std::wstring& newVersion, std::wstring& downloadUrl)
+bool CheckForUpdateGeneric(const wchar_t* repoOwner, const wchar_t* repoName,
+                           const wchar_t* currentVersion,
+                           std::wstring& newVersion, std::wstring& downloadUrl)
 {
-    // Build API path from defines in Version.h.
     std::wstring apiPath = L"/repos/";
-    apiPath += GITHUB_REPO_OWNER;
+    apiPath += repoOwner;
     apiPath += L"/";
-    apiPath += GITHUB_REPO_NAME;
+    apiPath += repoName;
     apiPath += L"/releases/latest";
 
     std::string body;
@@ -286,7 +294,6 @@ bool CheckForUpdate(std::wstring& newVersion, std::wstring& downloadUrl)
         return false;
     }
 
-    // Extract tag_name (expected format: "v0.1.2" or "0.1.2").
     std::wstring tagName;
     if (!JsonExtractString(body, "tag_name", tagName))
     {
@@ -294,17 +301,10 @@ bool CheckForUpdate(std::wstring& newVersion, std::wstring& downloadUrl)
         return false;
     }
 
-    // Strip leading 'v' if present.
     if (!tagName.empty() && (tagName[0] == L'v' || tagName[0] == L'V'))
         tagName = tagName.substr(1);
 
-    // Compare with current version.
-    // APP_VERSION is defined as a narrow string literal in Version.h.
-    std::wstring current;
-    {
-        const char* av = APP_VERSION;
-        current.assign(av, av + strlen(av));
-    }
+    std::wstring current(currentVersion);
 
     if (CompareVersions(tagName.c_str(), current.c_str()) <= 0)
     {
@@ -313,7 +313,6 @@ bool CheckForUpdate(std::wstring& newVersion, std::wstring& downloadUrl)
         return false;
     }
 
-    // Extract the installer download URL from the assets.
     if (!JsonExtractInstallerUrl(body, downloadUrl))
     {
         printf("AutoUpdate: no .exe asset found in release.\n");
@@ -326,12 +325,21 @@ bool CheckForUpdate(std::wstring& newVersion, std::wstring& downloadUrl)
     return true;
 }
 
-bool DownloadAndInstallUpdate(const std::wstring& downloadUrl)
+bool CheckForUpdate(std::wstring& newVersion, std::wstring& downloadUrl)
+{
+    const char* av = APP_VERSION;
+    std::wstring current(av, av + strlen(av));
+    return CheckForUpdateGeneric(GITHUB_REPO_OWNER, GITHUB_REPO_NAME,
+                                 current.c_str(), newVersion, downloadUrl);
+}
+
+bool DownloadAndInstallUpdate(const std::wstring& downloadUrl,
+                              const wchar_t* installerFilename)
 {
     wchar_t tempDir[MAX_PATH] = {};
     GetTempPathW(MAX_PATH, tempDir);
 
-    std::wstring tempFile = std::wstring(tempDir) + L"AhlbornBridge_Setup.exe";
+    std::wstring tempFile = std::wstring(tempDir) + installerFilename;
 
     printf("AutoUpdate: downloading %ls -> %ls\n",
            downloadUrl.c_str(), tempFile.c_str());
@@ -350,7 +358,7 @@ bool DownloadAndInstallUpdate(const std::wstring& downloadUrl)
     sei.fMask = SEE_MASK_NOCLOSEPROCESS;
     sei.lpVerb = L"open";
     sei.lpFile = tempFile.c_str();
-    sei.lpParameters = L"/SILENT";
+    sei.lpParameters = nullptr;
     sei.nShow = SW_SHOWNORMAL;
 
     if (!ShellExecuteExW(&sei))
@@ -363,17 +371,20 @@ bool DownloadAndInstallUpdate(const std::wstring& downloadUrl)
     return true;
 }
 
-void CheckForUpdateInteractive(HWND hParent)
+void CheckForUpdateInteractive(HWND hParent, bool silent)
 {
     std::wstring newVersion;
     std::wstring downloadUrl;
 
     if (!CheckForUpdate(newVersion, downloadUrl))
     {
-        MessageBoxW(hParent,
-                     L"You are running the latest version of AhlbornBridge.",
-                     L"AhlbornBridge Update",
-                     MB_OK | MB_ICONINFORMATION);
+        if (!silent)
+        {
+            MessageBoxW(hParent,
+                         L"You are running the latest version of AhlbornBridge.",
+                         L"AhlbornBridge Update",
+                         MB_OK | MB_ICONINFORMATION);
+        }
         return;
     }
 
@@ -398,6 +409,101 @@ void CheckForUpdateInteractive(HWND hParent)
         MessageBoxW(hParent,
                      L"Failed to download the update.\nPlease try again later or download manually from GitHub.",
                      L"AhlbornBridge Update",
+                     MB_OK | MB_ICONERROR);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Plugin Update
+// ---------------------------------------------------------------------------
+
+// Read the installed plugin version from manifest.json in the SD plugins folder.
+static bool GetInstalledPluginVersion(std::wstring& version)
+{
+    wchar_t appData[MAX_PATH] = {};
+    if (FAILED(SHGetFolderPathW(nullptr, CSIDL_APPDATA, nullptr, 0, appData)))
+        return false;
+
+    std::wstring manifestPath = std::wstring(appData) +
+        L"\\Elgato\\StreamDeck\\Plugins\\com.ahlbornbridge.organ.sdPlugin\\manifest.json";
+
+    HANDLE hFile = CreateFileW(manifestPath.c_str(), GENERIC_READ, FILE_SHARE_READ,
+                               nullptr, OPEN_EXISTING, 0, nullptr);
+    if (hFile == INVALID_HANDLE_VALUE)
+        return false;
+
+    DWORD fileSize = GetFileSize(hFile, nullptr);
+    if (fileSize == INVALID_FILE_SIZE || fileSize == 0)
+    {
+        CloseHandle(hFile);
+        return false;
+    }
+
+    std::string json(fileSize, '\0');
+    DWORD bytesRead = 0;
+    ReadFile(hFile, json.data(), fileSize, &bytesRead, nullptr);
+    CloseHandle(hFile);
+
+    return JsonExtractString(json, "Version", version);
+}
+
+void CheckForPluginUpdateInteractive(HWND hParent, bool silent)
+{
+    std::wstring currentVersion;
+    if (!GetInstalledPluginVersion(currentVersion))
+    {
+        if (!silent)
+        {
+            MessageBoxW(hParent,
+                         L"Stream Deck plugin is not installed.\n"
+                         L"Install it first, then check for updates.",
+                         L"Plugin Update",
+                         MB_OK | MB_ICONWARNING);
+        }
+        return;
+    }
+
+    std::wstring newVersion;
+    std::wstring downloadUrl;
+
+    if (!CheckForUpdateGeneric(PLUGIN_GITHUB_REPO_OWNER, PLUGIN_GITHUB_REPO_NAME,
+                               currentVersion.c_str(), newVersion, downloadUrl))
+    {
+        if (!silent)
+        {
+            std::wstring msg = L"Stream Deck plugin v" + currentVersion +
+                               L" is up to date.";
+            MessageBoxW(hParent, msg.c_str(),
+                         L"Plugin Update",
+                         MB_OK | MB_ICONINFORMATION);
+        }
+        return;
+    }
+
+    std::wstring msg = L"A new version of the Stream Deck plugin is available: v" + newVersion +
+                       L"\nInstalled version: v" + currentVersion +
+                       L"\n\nDo you want to download and install it now?";
+
+    int result = MessageBoxW(hParent, msg.c_str(),
+                              L"Plugin Update",
+                              MB_YESNO | MB_ICONQUESTION);
+    if (result != IDYES)
+        return;
+
+    if (DownloadAndInstallUpdate(downloadUrl, L"AhlbornBridgeSD_Setup.exe"))
+    {
+        MessageBoxW(hParent,
+                     L"Plugin installer started.\n"
+                     L"Stream Deck will restart automatically.",
+                     L"Plugin Update",
+                     MB_OK | MB_ICONINFORMATION);
+    }
+    else
+    {
+        MessageBoxW(hParent,
+                     L"Failed to download the plugin update.\n"
+                     L"Please try again later or download manually from GitHub.",
+                     L"Plugin Update",
                      MB_OK | MB_ICONERROR);
     }
 }

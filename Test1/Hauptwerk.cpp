@@ -174,7 +174,10 @@ namespace
         CloseHandle(snapshot);
     }
 
-
+bool IsProcessRunningByName(const wchar_t* processName)
+{
+    return IsProcessRunning(processName);
+}
 
 bool LaunchHauptwerkAndDismissWelcome()
 {

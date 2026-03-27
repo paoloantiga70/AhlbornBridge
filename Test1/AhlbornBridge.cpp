@@ -4,11 +4,15 @@
 #include "Hauptwerk.h"
 #include "StreamDeck.h"
 #include "Xml.h"
+#include "AutoUpdate.h"
+#include "StreamDeck_profiler.h"
 #include <tlhelp32.h>
 #include <cwchar>
 #include <windows.h>
 #include <shlobj.h>
 #include <knownfolders.h>
+#include <wininet.h>
+#pragma comment(lib, "wininet.lib")
 
 
 
@@ -58,8 +62,20 @@ if (FAILED(hr))
 	}
 //#endif
 	bool hauptwerkPathsOk = InitHauptwerkPaths(); // Detect / configure Hauptwerk folders
+	if (hauptwerkPathsOk)
+	{
+		StartOrganFolderWatcher(); // Monitor OrganDefinitions for installs/uninstalls
+		printf("[Startup] OrganFolderWatcher started.\n");
+	}
+	else
+	{
+		printf("[Startup] Hauptwerk paths not configured, OrganFolderWatcher not started.\n");
+	}
+	StartStreamDeckPipeServer(); // Named pipe IPC for Stream Deck plugin
 	initMidiState(); // Initialize MIDI state
+	printf("[Startup] MIDI state initialized.\n");
 	startsWithFe();  // Start the MIDI processing thread
+	printf("[Startup] MIDI processing thread started.\n");
 
 	const wchar_t className[] = L"AhlbornBridgeTrayWindow";
 	WNDCLASSW wc = {};
@@ -115,6 +131,31 @@ if (FAILED(hr))
 		{
 			printf("No MIDI device configured in Settings.xml. Opening Settings window.\n");
 			ShowSettingsWindow(hInstance, hWnd);
+		}
+
+		// Check for updates on start if enabled.
+		// Run on a background thread so a slow/absent network connection
+		// does not block the main message loop at startup.
+		bool checkForUpdateOnStart = true;
+		LoadCheckForUpdateOnStart(checkForUpdateOnStart);
+		if (checkForUpdateOnStart)
+		{
+			HANDLE hUpdateThread = CreateThread(nullptr, 0, [](LPVOID param) -> DWORD {
+					// Aspetta fino a 60 secondi che la rete sia disponibile (es. WiFi lento all'avvio).
+					constexpr int kMaxRetries = 6;
+					constexpr DWORD kRetryIntervalMs = 10000; // 10 secondi
+					for (int i = 0; i < kMaxRetries; ++i)
+					{
+						Sleep(kRetryIntervalMs);
+						DWORD flags = 0;
+						if (InternetGetConnectedState(&flags, 0))
+							break;
+						printf("AutoUpdate: rete non disponibile, tentativo %d/%d...\n", i + 1, kMaxRetries);
+					}
+					CheckForUpdateInteractive(reinterpret_cast<HWND>(param), true);
+					return 0;
+				}, hWnd, 0, nullptr);
+				if (hUpdateThread) CloseHandle(hUpdateThread);
 		}
 	}
 
