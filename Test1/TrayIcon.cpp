@@ -991,8 +991,20 @@ LRESULT CALLBACK SettingsWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM 
         }
         if (HIWORD(wParam) == BN_CLICKED && LOWORD(wParam) == kSdSendButtonId)
         {
-            if (CreateStreamDeckProfileFromSettings())
-                MessageBoxW(hWnd, L"Stream Deck profile created successfully!", L"Stream Deck", MB_OK | MB_ICONINFORMATION);
+            // Stop Stream Deck so we can safely write profile files
+            system("taskkill /f /im StreamDeck.exe >nul 2>&1");
+            Sleep(2000);
+
+            bool ok = CreateStreamDeckProfileFromSettings();
+
+            // Restart Stream Deck to pick up the new/updated profile
+            Sleep(1000);
+            ShellExecuteW(nullptr, L"open",
+                L"C:\\Program Files\\Elgato\\StreamDeck\\StreamDeck.exe",
+                nullptr, nullptr, SW_HIDE);
+
+            if (ok)
+                MessageBoxW(hWnd, L"Stream Deck profile created!\nStream Deck has been restarted.", L"Stream Deck", MB_OK | MB_ICONINFORMATION);
             else
                 MessageBoxW(hWnd, L"Failed to create Stream Deck profile.\nCheck that organs are installed.", L"Stream Deck", MB_OK | MB_ICONERROR);
             return 0;

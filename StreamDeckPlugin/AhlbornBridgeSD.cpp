@@ -348,10 +348,10 @@ static std::string BuildButtonSvg(const std::string& title, bool loaded)
 {
     const std::string& bgImage = loaded ? g_bgImageOn : g_bgImageOff;
 
-    std::string svg = "<svg width='144' height='144' xmlns='http://www.w3.org/2000/svg'>";
+    std::string svg = "<svg width='144' height='144' xmlns='http://www.w3.org/2000/svg' xmlns:xlink='http://www.w3.org/1999/xlink'>";
     if (!bgImage.empty())
     {
-        svg += "<image width='144' height='144' href='data:image/png;base64," + bgImage + "'/>";
+        svg += "<image width='144' height='144' xlink:href='data:image/png;base64," + bgImage + "'/>";
     }
     else
     {
@@ -410,45 +410,25 @@ static void SdSetImage(const std::string& context, const std::string& svg, int s
     WsSend(json);
 }
 
-// ─── Word-wrap for button titles ────────────────────────────────────────
+// ─── Resolve display title for a button ─────────────────────────────────
 
-static std::string WrapTitle(const std::string& text, int maxChars = 10, int maxLines = 6)
+static std::string ResolveButtonTitle(int organIndex, const std::string& cachedOrganName)
 {
-    std::string result;
-    std::string word;
-    int lineLen = 0, lines = 1;
-    auto flush = [&]() {
-        if (word.empty()) return;
-        if (lineLen > 0 && lineLen + 1 + (int)word.size() > maxChars)
-        {
-            if (lines >= maxLines) return;
-            result += "\\n";
-            lineLen = 0;
-            ++lines;
-        }
-        else if (lineLen > 0)
-        {
-            result += " ";
-            ++lineLen;
-        }
-        result += word;
-        lineLen += (int)word.size();
-        word.clear();
-    };
-    for (char c : text)
     {
-        if (c == ' ' || c == '-')
+        std::lock_guard<std::mutex> ol(g_organsMutex);
+        for (auto& o : g_organs)
         {
-            word += c;
-            flush();
-        }
-        else
-        {
-            word += c;
+            if (o.index == organIndex)
+                return o.name;
         }
     }
-    flush();
-    return result;
+    if (!cachedOrganName.empty())
+        return cachedOrganName;
+    if (organIndex == 0)
+        return "Empty";
+    if (!g_pipeConnected.load())
+        return "Disconnected.";
+    return "ORGAN " + std::to_string(organIndex);
 }
 
 // ─── Update all visible buttons ─────────────────────────────────────────
@@ -467,28 +447,7 @@ static void UpdateAllButtons()
 
     for (auto& [ctx, info] : g_visibleButtons)
     {
-        // Find organ name
-        std::string title;
-        {
-            std::lock_guard<std::mutex> ol(g_organsMutex);
-            for (auto& o : g_organs)
-            {
-                if (o.index == info.organIndex)
-                {
-                    title = o.name;
-                    break;
-                }
-            }
-        }
-        if (title.empty() && !info.organName.empty())
-            title = info.organName;
-        if (title.empty())
-        {
-            if (info.organIndex == 0)
-                title = "Empty";
-            else
-                title = "ORGAN " + std::to_string(info.organIndex);
-        }
+        std::string title = ResolveButtonTitle(info.organIndex, info.organName);
 
         int st = (info.organIndex == loaded && loaded > 0) ? 1 : 0;
         Log("  button ctx=%.30s organIndex=%d title=%s state=%d",
@@ -506,25 +465,14 @@ static void UpdateAllButtons()
 
 static void UpdateButtonForContext(const std::string& context, int organIndex)
 {
-    std::string title;
+    std::string cachedName;
     {
-        std::lock_guard<std::mutex> ol(g_organsMutex);
-        for (auto& o : g_organs)
-        {
-            if (o.index == organIndex)
-            {
-                title = o.name;
-                break;
-            }
-        }
+        std::lock_guard<std::mutex> lk(g_buttonsMutex);
+        auto it = g_visibleButtons.find(context);
+        if (it != g_visibleButtons.end())
+            cachedName = it->second.organName;
     }
-    if (title.empty())
-    {
-        if (organIndex == 0)
-            title = "Empty";
-        else
-            title = "ORGAN " + std::to_string(organIndex);
-    }
+    std::string title = ResolveButtonTitle(organIndex, cachedName);
 
     int loaded;
     {
@@ -919,28 +867,7 @@ static void HandleSdEvent(const std::string& json)
             g_visibleButtons[context] = { context, organIndex, organName };
         }
 
-        // Set title and state for this button
-        std::string title;
-        {
-            std::lock_guard<std::mutex> ol(g_organsMutex);
-            for (auto& o : g_organs)
-            {
-                if (o.index == organIndex)
-                {
-                    title = o.name;
-                    break;
-                }
-            }
-        }
-        if (title.empty() && !organName.empty())
-            title = organName;
-        if (title.empty())
-        {
-            if (organIndex == 0)
-                title = "Empty";
-            else
-                title = "ORGAN " + std::to_string(organIndex);
-        }
+        std::string title = ResolveButtonTitle(organIndex, organName);
 
         int loaded;
         {
@@ -1106,23 +1033,7 @@ static void HandleSdEvent(const std::string& json)
             }
         }
 
-        // Update button display
-        std::string title;
-        {
-            std::lock_guard<std::mutex> ol(g_organsMutex);
-            for (auto& o : g_organs)
-            {
-                if (o.index == organIndex)
-                {
-                    title = o.name;
-                    break;
-                }
-            }
-        }
-        if (title.empty() && !organName.empty())
-            title = organName;
-        if (title.empty())
-            title = (organIndex == 0) ? "Empty" : "ORGAN " + std::to_string(organIndex);
+        std::string title = ResolveButtonTitle(organIndex, organName);
 
         int loaded;
         {
