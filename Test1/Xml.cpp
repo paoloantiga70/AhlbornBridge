@@ -63,7 +63,7 @@ namespace
     };
 
     // Forward declarations.
-    bool WriteSettingsXml(const std::wstring& inputDeviceName, const std::wstring& input2DeviceName, const std::wstring& outputDeviceName, const std::wstring& output2DeviceName, bool routerEnabled, bool closeSettingsOnDisconnect, bool showDebugConsole, bool checkForUpdateOnStart, const DeviceEnabledStates& devEnabled);
+    bool WriteSettingsXml(const std::wstring& inputDeviceName, const std::wstring& input2DeviceName, const std::wstring& outputDeviceName, const std::wstring& output2DeviceName, bool routerEnabled, bool closeSettingsOnDisconnect, bool showDebugConsole, bool checkForUpdateOnStart, const DeviceEnabledStates& devEnabled, int inputDeviceId = -1, int input2DeviceId = -1, int outputDeviceId = -1, int output2DeviceId = -1);
     std::wstring ReadHauptwerkStandbyOrgans();
     std::wstring ReadHauptwerkInstalledOrgans();
 
@@ -709,7 +709,7 @@ namespace
 		TryGetTagStringValue(section, L"<MidiIn>", L"</MidiIn>", s_cachedStreamDeckMidiIn);
 	}
 
-	bool WriteSettingsXml(const std::wstring& inputDeviceName, const std::wstring& input2DeviceName, const std::wstring& outputDeviceName, const std::wstring& output2DeviceName, bool routerEnabled, bool closeSettingsOnDisconnect, bool showDebugConsole, bool checkForUpdateOnStart, const DeviceEnabledStates& devEnabled)
+	bool WriteSettingsXml(const std::wstring& inputDeviceName, const std::wstring& input2DeviceName, const std::wstring& outputDeviceName, const std::wstring& output2DeviceName, bool routerEnabled, bool closeSettingsOnDisconnect, bool showDebugConsole, bool checkForUpdateOnStart, const DeviceEnabledStates& devEnabled, int inputDeviceId, int input2DeviceId, int outputDeviceId, int output2DeviceId)
 	{
 		std::wstring settingsDir = GetSettingsDirPath();
 		if (!CreateDirectoryW(settingsDir.c_str(), nullptr))
@@ -743,11 +743,20 @@ namespace
 		}
 
 		// Resolve current device indices so we can store them as id attributes.
-		auto buildDeviceTag = [](const wchar_t* tag, const std::wstring& name, bool isOutput, bool enabled) -> std::wstring
+		auto buildDeviceTag = [numInDevs, numOutDevs](const wchar_t* tag, const std::wstring& name, bool isOutput, bool enabled, int preferredId) -> std::wstring
 		{
 			UINT idx = 0;
 			bool found = false;
-			if (!name.empty())
+			if (preferredId >= 0)
+			{
+				UINT preferred = static_cast<UINT>(preferredId);
+				if ((!isOutput && preferred < numInDevs) || (isOutput && preferred < numOutDevs))
+				{
+					idx = preferred;
+					found = true;
+				}
+			}
+			else if (!name.empty())
 				found = isOutput ? FindMidiOutputDeviceIndex(name, idx) : FindMidiInputDeviceIndex(name, idx);
 			std::wstring s = L"      <";
 			s += tag;
@@ -778,10 +787,10 @@ namespace
 			L"<Settings>\r\n"
 			L"  <Midi>\r\n"
 			L"    <SettingsDevices>\r\n"
-			+ buildDeviceTag(L"MidiInputDevice01", inputDeviceName, false, devEnabled.input1)
-				+ buildDeviceTag(L"MidiInputDevice02", input2DeviceName, false, devEnabled.input2)
-				+ buildDeviceTag(L"MidiOutputDevice01", outputDeviceName, true, devEnabled.output1)
-				+ buildDeviceTag(L"MidiOutputDevice02", output2DeviceName, true, devEnabled.output2) +
+			+ buildDeviceTag(L"MidiInputDevice01", inputDeviceName, false, devEnabled.input1, inputDeviceId)
+				+ buildDeviceTag(L"MidiInputDevice02", input2DeviceName, false, devEnabled.input2, input2DeviceId)
+				+ buildDeviceTag(L"MidiOutputDevice01", outputDeviceName, true, devEnabled.output1, outputDeviceId)
+				+ buildDeviceTag(L"MidiOutputDevice02", output2DeviceName, true, devEnabled.output2, output2DeviceId) +
 			L"    </SettingsDevices>\r\n"
 			L"    <MidiRouterEnabled>" + std::to_wstring(routerEnabled ? 1 : 0) + L"</MidiRouterEnabled>\r\n"
 			L"  </Midi>\r\n"
@@ -893,7 +902,7 @@ bool SaveSelectedOutputDeviceId(UINT deviceId)
     LoadShowDebugConsole(showDebugConsole);
     bool checkForUpdateOnStart = true;
     LoadCheckForUpdateOnStart(checkForUpdateOnStart);
-    return WriteSettingsXml(inputName, input2Name, GetMidiOutputDeviceName(deviceId), output2Name, routerEnabled, closeSettingsOnDisconnect, showDebugConsole, checkForUpdateOnStart, devEnabled);
+    return WriteSettingsXml(inputName, input2Name, GetMidiOutputDeviceName(deviceId), output2Name, routerEnabled, closeSettingsOnDisconnect, showDebugConsole, checkForUpdateOnStart, devEnabled, -1, -1, static_cast<int>(deviceId), -1);
 }
 
 bool SaveMidiRouterEnabled(bool enabled)
@@ -1039,6 +1048,12 @@ bool LoadSelectedOutputDeviceId(UINT& deviceId)
     std::wstring devicesSection;
     if (!TryGetSection(midiSection, L"SettingsDevices", devicesSection))
         return false;
+
+    if (TryGetTagIdAttribute(devicesSection, L"MidiOutputDevice01", deviceId))
+    {
+        if (deviceId < midiOutGetNumDevs())
+            return true;
+    }
 
     std::wstring name;
     if (!TryGetTagStringValue(devicesSection, L"<MidiOutputDevice01>", L"</MidiOutputDevice01>", name))
