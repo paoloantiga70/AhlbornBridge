@@ -1049,14 +1049,23 @@ bool LoadSelectedOutputDeviceId(UINT& deviceId)
     if (!TryGetSection(midiSection, L"SettingsDevices", devicesSection))
         return false;
 
+    std::wstring name;
+    bool hasName = TryGetTagStringValue(devicesSection, L"<MidiOutputDevice01>", L"</MidiOutputDevice01>", name);
+
     if (TryGetTagIdAttribute(devicesSection, L"MidiOutputDevice01", deviceId))
     {
         if (deviceId < midiOutGetNumDevs())
-            return true;
+        {
+            if (!hasName)
+                return true;
+
+            std::wstring currentName = GetMidiOutputDeviceName(deviceId);
+            if (currentName == name)
+                return true;
+        }
     }
 
-    std::wstring name;
-    if (!TryGetTagStringValue(devicesSection, L"<MidiOutputDevice01>", L"</MidiOutputDevice01>", name))
+    if (!hasName)
         return false;
 
     return FindMidiOutputDeviceIndex(name, deviceId);
